@@ -1,0 +1,19 @@
+menu "WetzelMesh Configuration"
+
+choice APP_ROLE
+    prompt "Device Role"
+    default APP_ROLE_GATEWAY
+    help
+        Select the role for this device:
+        - Gateway: Connects to Wi-Fi, UART and MQTT.
+        - Node: Participates in BLE Mesh network.
+
+config APP_ROLE_GATEWAY
+    bool "Gateway (Wi-Fi + UART + MQTT)"
+
+config APP_ROLE_NODE
+    bool "Node (BLE Mesh only)"
+
+endchoice
+
+endmenu

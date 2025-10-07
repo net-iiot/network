@@ -3,7 +3,11 @@
 extern "C" {
     #include "esp_log.h"
     #include "nvs_flash.h"
+    #include "freertos/FreeRTOS.h"
+    #include "freertos/task.h"
+    #include "esp_system.h"
 }
+
 
 #include "mesh_transport.hpp"
 #include "uart_bridge.hpp"
@@ -20,15 +24,28 @@ extern "C" void app_main(void)
         ESP_ERROR_CHECK(nvs_flash_init());
     }
 
-    ESP_LOGI(TAG, "monimesh boot OK (C++ project)");
+#if CONFIG_APP_ROLE_GATEWAY
+    ESP_LOGI(TAG, "Device Role: GATEWAY");
+#elif CONFIG_APP_ROLE_NODE
+    ESP_LOGI(TAG, "Device Role: NODE");
+#else
+    #error "Device role not defined! Check menuconfig."
+#endif
 
     monimesh::MeshTransport mesh;
     monimesh::UARTBridge uart;
     monimesh::MQTTGateway mqtt;
 
-    mesh.init();
-    uart.init();
-    mqtt.connect();
+    ESP_ERROR_CHECK(mesh.init());
+    ESP_ERROR_CHECK(uart.init());
+#if CONFIG_APP_ROLE_GATEWAY
+    ESP_ERROR_CHECK(mqtt.connect());
+#endif
 
     ESP_LOGI(TAG, "System initialized");
+
+    while (true) {
+        mesh.process();
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
 }
