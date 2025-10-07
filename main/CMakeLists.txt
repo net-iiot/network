@@ -8,5 +8,7 @@ idf_component_register(
         protocol
         router
         gateway
+        router
+        ble_transport
 )
 

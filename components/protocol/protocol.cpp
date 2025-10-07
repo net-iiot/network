@@ -1,7 +1,7 @@
 #include "protocol.hpp"
 #include "cJSON.h"
 
-namespace Protocol
+namespace WetzelMesh::Protocol
 {
 
     static const char *typeToString(PacketType type)

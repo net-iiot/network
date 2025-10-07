@@ -2,7 +2,7 @@
 #include "json_codec.hpp"
 #include <string>
 
-namespace Protocol
+namespace WetzelMesh::Protocol
 {
 
     enum class PacketType

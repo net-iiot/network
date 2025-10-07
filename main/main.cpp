@@ -1,91 +1,58 @@
 #include <string>
 #include "esp_log.h"
-#include "esp_mac.h"
+#include "esp_mac.h" // ✅ necessário agora
 #include "esp_system.h"
-// #include "nvs_flash.h"
+#include "nvs_flash.h"
+
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
 #include "protocol.hpp"
 #include "router.hpp"
 #include "gateway.hpp"
+#include "ble_transport.hpp"
 
 static const char *TAG = "APP";
 
-/* ======================================================
- *  FUNÇÃO PRINCIPAL - WETZELMESH
- * ====================================================== */
 extern "C" void app_main(void)
 {
-    // ======================================================
-    // 🔧 Inicialização do sistema
-    // ======================================================
-    // esp_err_t ret = nvs_flash_init();
-    // if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND)
-    // {
-    //     nvs_flash_erase();
-    //     nvs_flash_init();
-    // }
-
-    ESP_LOGI(TAG, "================================================");
-    ESP_LOGI(TAG, " WETZELMESH - Sistema inicializando...");
-    ESP_LOGI(TAG, "================================================");
-
-    // ======================================================
-    // 🧠 Inicialização dos módulos principais
-    // ======================================================
-    ESP_LOGI(TAG, "Inicializando protocolo JSON...");
-    auto pkt = Protocol::make_request(
-        "node-01",
-        "gateway",
-        "POST",
-        "/api/telemetry",
-        R"({"temperature":25.4,"humidity":61,"voltage":3.79})");
-
-    std::string jsonStr = Protocol::serialize(pkt);
-    ESP_LOGI(TAG, "Pacote serializado: %s", jsonStr.c_str());
-
-    Protocol::Packet parsed;
-    if (Protocol::parse(jsonStr, parsed))
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND)
     {
-        ESP_LOGI(TAG, "Pacote analisado com sucesso:");
-        ESP_LOGI(TAG, "  Type: %d", static_cast<int>(parsed.type));
-        ESP_LOGI(TAG, "  Route: %s -> %s", parsed.route.src.c_str(), parsed.route.dst.c_str());
-        ESP_LOGI(TAG, "  Endpoint: %s", parsed.endpoint.c_str());
-        ESP_LOGI(TAG, "  Body: %s", parsed.body.c_str());
-    }
-    else
-    {
-        ESP_LOGE(TAG, "Falha ao interpretar pacote JSON!");
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ESP_ERROR_CHECK(nvs_flash_init());
     }
 
-    // ======================================================
-    // 🚦 Inicialização do roteador
-    // ======================================================
-    ESP_LOGI(TAG, "Inicializando roteador...");
+    ESP_LOGI(TAG, "============================================");
+    ESP_LOGI(TAG, "   WetzelMesh - Sistema de Comunicação Mesh  ");
+    ESP_LOGI(TAG, "============================================");
+
+    ESP_LOGI(TAG, "Inicializando Router...");
     WetzelMesh::Router::init();
 
-    // Teste de roteamento
-    ESP_LOGI(TAG, "Enviando pacote de teste ao roteador...");
-    WetzelMesh::Router::handle_packet(pkt);
-
-    ESP_LOGI(TAG, "Inicializando gateway UART...");
+    ESP_LOGI(TAG, "Inicializando Gateway UART...");
     WetzelMesh::Gateway::init();
-    // Gateway::start_http_loop();
-    // BLETransport::start_mesh();
 
-    ESP_LOGI(TAG, "================================================");
-    ESP_LOGI(TAG, " Sistema WetzelMesh inicializado com sucesso!");
-    ESP_LOGI(TAG, "================================================");
+    ESP_LOGI(TAG, "Inicializando BLE Mesh Transport...");
+    WetzelMesh::BLETransport::init();
 
+    WetzelMesh::Protocol::Packet pkt;
+    pkt.type = WetzelMesh::Protocol::PacketType::REQUEST;
+    pkt.route.src = "node-01";
+    pkt.route.dst = "gateway";
+    pkt.method = "POST";
+    pkt.endpoint = "/api/telemetry";
+    pkt.body = R"({"temperature": 24.5, "humidity": 62, "voltage": 3.78})";
+
+    ESP_LOGI(TAG, "Enviando pacote inicial de teste...");
     WetzelMesh::Gateway::send(pkt);
+    WetzelMesh::BLETransport::send(pkt);
 
-    // ======================================================
-    // 🕒 Loop principal (placeholder)
-    // ======================================================
+    ESP_LOGI(TAG, "Sistema WetzelMesh inicializado com sucesso!");
+    ESP_LOGI(TAG, "Aguardando pacotes da rede...");
+
     while (true)
     {
-        vTaskDelay(pdMS_TO_TICKS(5000));
-        ESP_LOGI(TAG, "WetzelMesh em execução...");
+        vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
