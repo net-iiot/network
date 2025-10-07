@@ -3,22 +3,22 @@
 #include "esp_mac.h"
 #include "esp_system.h"
 //#include "nvs_flash.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 #include "protocol.hpp"
-// #include "router.hpp"
-// #include "gateway.hpp"
-// #include "ble_transport.hpp"
+#include "router.hpp"
 
 static const char *TAG = "APP";
 
 /* ======================================================
- *  FUNÇÃO PRINCIPAL
+ *  FUNÇÃO PRINCIPAL - WETZELMESH
  * ====================================================== */
 extern "C" void app_main(void)
 {
-    // ==============================
+    // ======================================================
     // 🔧 Inicialização do sistema
-    // ==============================
+    // ======================================================
     // esp_err_t ret = nvs_flash_init();
     // if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND)
     // {
@@ -30,13 +30,15 @@ extern "C" void app_main(void)
     ESP_LOGI(TAG, " WETZELMESH - Sistema inicializando...");
     ESP_LOGI(TAG, "================================================");
 
-    // ==============================
-    // 🧠 Inicialização dos módulos
-    // ==============================
+    // ======================================================
+    // 🧠 Inicialização dos módulos principais
+    // ======================================================
     ESP_LOGI(TAG, "Inicializando protocolo JSON...");
-    // Aqui apenas validamos o módulo protocol por enquanto
     auto pkt = Protocol::make_request(
-        "node-01", "gateway", "POST", "/api/telemetry",
+        "node-01",
+        "gateway",
+        "POST",
+        "/api/telemetry",
         R"({"temperature":25.4,"humidity":61,"voltage":3.79})"
     );
 
@@ -57,16 +59,33 @@ extern "C" void app_main(void)
         ESP_LOGE(TAG, "Falha ao interpretar pacote JSON!");
     }
 
-    // ==============================
-    // 🚀 Inicialização futura dos módulos de comunicação
-    // ==============================
-    // Router::init();
+    // ======================================================
+    // 🚦 Inicialização do roteador
+    // ======================================================
+    ESP_LOGI(TAG, "Inicializando roteador...");
+    WetzelMesh::Router::init();
+
+    // Teste de roteamento
+    ESP_LOGI(TAG, "Enviando pacote de teste ao roteador...");
+    WetzelMesh::Router::handle_packet(pkt);
+
+    // ======================================================
+    // 🛰️ Futuro: inicialização do gateway (UART / BLE / Wi-Fi)
+    // ======================================================
     // Gateway::init_uart();
     // Gateway::start_http_loop();
     // BLETransport::start_mesh();
-    // Essas funções entrarão nas próximas etapas.
 
     ESP_LOGI(TAG, "================================================");
     ESP_LOGI(TAG, " Sistema WetzelMesh inicializado com sucesso!");
     ESP_LOGI(TAG, "================================================");
+
+    // ======================================================
+    // 🕒 Loop principal (placeholder)
+    // ======================================================
+    while (true)
+    {
+        vTaskDelay(pdMS_TO_TICKS(5000));
+        ESP_LOGI(TAG, "WetzelMesh em execução...");
+    }
 }

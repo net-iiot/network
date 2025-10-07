@@ -6,5 +6,6 @@ idf_component_register(
         interpreters
         security
         protocol
+        router
 )
 
