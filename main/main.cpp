@@ -2,12 +2,13 @@
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_system.h"
-//#include "nvs_flash.h"
+// #include "nvs_flash.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
 #include "protocol.hpp"
 #include "router.hpp"
+#include "gateway.hpp"
 
 static const char *TAG = "APP";
 
@@ -39,8 +40,7 @@ extern "C" void app_main(void)
         "gateway",
         "POST",
         "/api/telemetry",
-        R"({"temperature":25.4,"humidity":61,"voltage":3.79})"
-    );
+        R"({"temperature":25.4,"humidity":61,"voltage":3.79})");
 
     std::string jsonStr = Protocol::serialize(pkt);
     ESP_LOGI(TAG, "Pacote serializado: %s", jsonStr.c_str());
@@ -69,16 +69,16 @@ extern "C" void app_main(void)
     ESP_LOGI(TAG, "Enviando pacote de teste ao roteador...");
     WetzelMesh::Router::handle_packet(pkt);
 
-    // ======================================================
-    // 🛰️ Futuro: inicialização do gateway (UART / BLE / Wi-Fi)
-    // ======================================================
-    // Gateway::init_uart();
+    ESP_LOGI(TAG, "Inicializando gateway UART...");
+    WetzelMesh::Gateway::init();
     // Gateway::start_http_loop();
     // BLETransport::start_mesh();
 
     ESP_LOGI(TAG, "================================================");
     ESP_LOGI(TAG, " Sistema WetzelMesh inicializado com sucesso!");
     ESP_LOGI(TAG, "================================================");
+
+    WetzelMesh::Gateway::send(pkt);
 
     // ======================================================
     // 🕒 Loop principal (placeholder)

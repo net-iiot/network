@@ -7,5 +7,6 @@ idf_component_register(
         security
         protocol
         router
+        gateway
 )
 
