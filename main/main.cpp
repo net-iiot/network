@@ -11,6 +11,7 @@
 #include "router.hpp"
 #include "gateway.hpp"
 #include "ble_transport.hpp"
+#include "network_manager.hpp"
 
 static const char *TAG = "APP";
 
@@ -47,6 +48,9 @@ extern "C" void app_main(void)
     ESP_LOGI(TAG, "Enviando pacote inicial de teste...");
     WetzelMesh::Gateway::send(pkt);
     WetzelMesh::BLETransport::send(pkt);
+
+    ESP_LOGI(TAG, "Inicializando Network Manager...");
+    WetzelMesh::NetworkManager::init();
 
     ESP_LOGI(TAG, "Sistema WetzelMesh inicializado com sucesso!");
     ESP_LOGI(TAG, "Aguardando pacotes da rede...");

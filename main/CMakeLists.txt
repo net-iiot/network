@@ -10,5 +10,6 @@ idf_component_register(
         gateway
         router
         ble_transport
+        network_manager
 )
 
