@@ -45,9 +45,8 @@ extern "C" void app_main(void)
     pkt.endpoint = "/api/telemetry";
     pkt.body = R"({"temperature": 24.5, "humidity": 62, "voltage": 3.78})";
 
-    ESP_LOGI(TAG, "Enviando pacote inicial de teste...");
-    WetzelMesh::Gateway::send(pkt);
-    WetzelMesh::BLETransport::send(pkt);
+    ESP_LOGI(TAG, "Enviando pacote automatico...");
+    WetzelMesh::Router::handle_packet(pkt);
 
     ESP_LOGI(TAG, "Inicializando Network Manager...");
     WetzelMesh::NetworkManager::init();

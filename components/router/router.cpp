@@ -1,57 +1,55 @@
 #include "router.hpp"
-#include "esp_system.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
+#include "esp_log.h"
+#include "gateway.hpp"
+#include "ble_transport.hpp"
+#include "network_manager.hpp"
 
 using namespace WetzelMesh;
 static const char *TAG = "ROUTER";
 
 void Router::init()
 {
-    ESP_LOGI(TAG, "Router iniciado.");
+    ESP_LOGI(TAG, "Router iniciado com sucesso.");
 }
 
 void Router::handle_packet(const Protocol::Packet &packet)
 {
-    ESP_LOGI(TAG, "Roteando pacote de %s -> %s",
-             packet.route.src.c_str(), packet.route.dst.c_str());
-    ESP_LOGI(TAG, "Endpoint: %s", packet.endpoint.c_str());
+    ESP_LOGI(TAG, "📦 Recebido pacote de %s → %s (%s)",
+             packet.route.src.c_str(),
+             packet.route.dst.c_str(),
+             packet.endpoint.c_str());
 
+    // Se o destino é o gateway → envia via UART
     if (packet.route.dst == "gateway")
     {
-        send_to_gateway(packet);
+        ESP_LOGI(TAG, "🔁 Encaminhando para gateway via UART...");
+        Gateway::send(packet);
+        return;
     }
-    else if (packet.route.dst.starts_with("node-"))
+
+    // Se o destino é broadcast → envia para todos os vizinhos BLE
+    if (packet.route.dst == "broadcast")
     {
-        send_to_ble(packet);
+        ESP_LOGI(TAG, "📡 Broadcast para rede BLE...");
+        NetworkManager::broadcast(packet);
+        return;
     }
-    else if (packet.route.dst == "uart")
+
+    // Se é outro nó BLE específico
+    if (packet.route.dst.find("node-") == 0)
     {
-        send_to_uart(packet);
+        ESP_LOGI(TAG, "➡️ Encaminhando via BLE para %s", packet.route.dst.c_str());
+        BLETransport::send(packet);
+        return;
     }
-    else
-    {
-        ESP_LOGW(TAG, "Destino desconhecido: %s", packet.route.dst.c_str());
-    }
+
+    // Se é local → processar (por enquanto só loga)
+    ESP_LOGI(TAG, "📍 Pacote destinado a este nó, processando localmente...");
 }
 
-void Router::send_to_gateway(const Protocol::Packet &packet)
+void Router::send_to(const Protocol::Packet &packet, const std::string &target)
 {
-    std::string json = Protocol::serialize(packet);
-    ESP_LOGI(TAG, "→ Enviando ao Gateway: %s", json.c_str());
-    // Aqui futuramente: envio via UART
-}
-
-void Router::send_to_ble(const Protocol::Packet &packet)
-{
-    std::string json = Protocol::serialize(packet);
-    ESP_LOGI(TAG, "→ Enviando via BLE Mesh: %s", json.c_str());
-    // Aqui futuramente: envio via BLE
-}
-
-void Router::send_to_uart(const Protocol::Packet &packet)
-{
-    std::string json = Protocol::serialize(packet);
-    ESP_LOGI(TAG, "→ Enviando via UART: %s", json.c_str());
-    // Aqui futuramente: escrita no UART TX
+    Protocol::Packet p = packet;
+    p.route.dst = target;
+    handle_packet(p);
 }

@@ -16,7 +16,8 @@ void Gateway::init()
         .parity = UART_PARITY_DISABLE,
         .stop_bits = UART_STOP_BITS_1,
         .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
-        .source_clk = UART_SCLK_DEFAULT};
+        .source_clk = UART_SCLK_DEFAULT,
+    };
 
     ESP_ERROR_CHECK(uart_driver_install(UART_PORT, BUF_SIZE * 2, BUF_SIZE * 2, 0, NULL, 0));
     ESP_ERROR_CHECK(uart_param_config(UART_PORT, &uart_config));
