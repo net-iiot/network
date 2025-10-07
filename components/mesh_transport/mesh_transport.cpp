@@ -1,7 +1,7 @@
 #include "mesh_transport.hpp"
 #include "esp_log.h"
 
-namespace monimesh
+namespace wetzelmesh
 {
     static const char *TAG = "MeshTransport";
 

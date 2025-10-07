@@ -1,7 +1,7 @@
 #include "mqtt_gateway.hpp"
 #include "esp_log.h"
 
-namespace monimesh {
+namespace wetzelmesh {
 static const char* TAG = "MQTTGateway";
 
 esp_err_t MQTTGateway::connect() {

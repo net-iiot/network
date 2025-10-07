@@ -2,7 +2,7 @@
 #include "esp_err.h"
 #include <string>
 
-namespace monimesh {
+namespace wetzelmesh {
 class MQTTGateway {
 public:
     esp_err_t connect();

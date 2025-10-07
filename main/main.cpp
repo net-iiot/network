@@ -1,51 +1,31 @@
-#include <iostream>
-#include <memory>
-extern "C" {
-    #include "esp_log.h"
-    #include "nvs_flash.h"
-    #include "freertos/FreeRTOS.h"
-    #include "freertos/task.h"
-    #include "esp_system.h"
-}
-
-
-#include "mesh_transport.hpp"
-#include "uart_bridge.hpp"
-#include "mqtt_gateway.hpp"
-#include "interpreter_registry.hpp"
+#include <string>
+#include "esp_log.h"
+#include "json_codec.hpp"       // substitui o antigo cbor_codec.hpp
+#include "mesh_transport.hpp"   // seu módulo de transporte
+#include "uart_bridge.hpp"      // seu módulo UART
+#include "mqtt_gateway.hpp"     // gateway MQTT
 
 static const char* TAG = "APP";
 
 extern "C" void app_main(void)
 {
-    esp_err_t ret = nvs_flash_init();
-    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        ESP_ERROR_CHECK(nvs_flash_init());
+    ESP_LOGI(TAG, "wetzelmesh boot OK (C++ project)");
+
+    // Inicializações placeholder
+    ESP_LOGI(TAG, "MeshTransport: MeshTransport init (placeholder)");
+    ESP_LOGI(TAG, "UARTBridge: UARTBridge initialized (placeholder)");
+    ESP_LOGI(TAG, "MQTTGateway: Connecting to MQTT broker (placeholder)");
+
+    // Exemplo de uso do codec JSON
+    std::string encoded = wetzelmesh::JSONCodec::encode("status", "mesh node online");
+    ESP_LOGI(TAG, "Encoded message: %s", encoded.c_str());
+
+    std::string type, payload;
+    if (wetzelmesh::JSONCodec::decode(encoded, type, payload)) {
+        ESP_LOGI(TAG, "Decoded message -> type: %s | payload: %s", type.c_str(), payload.c_str());
+    } else {
+        ESP_LOGE(TAG, "Failed to decode JSON message");
     }
 
-#if CONFIG_APP_ROLE_GATEWAY
-    ESP_LOGI(TAG, "Device Role: GATEWAY");
-#elif CONFIG_APP_ROLE_NODE
-    ESP_LOGI(TAG, "Device Role: NODE");
-#else
-    #error "Device role not defined! Check menuconfig."
-#endif
-
-    monimesh::MeshTransport mesh;
-    monimesh::UARTBridge uart;
-    monimesh::MQTTGateway mqtt;
-
-    ESP_ERROR_CHECK(mesh.init());
-    ESP_ERROR_CHECK(uart.init());
-#if CONFIG_APP_ROLE_GATEWAY
-    ESP_ERROR_CHECK(mqtt.connect());
-#endif
-
-    ESP_LOGI(TAG, "System initialized");
-
-    while (true) {
-        mesh.process();
-        vTaskDelay(pdMS_TO_TICKS(1000));
-    }
+    ESP_LOGI(TAG, "APP: System initialized");
 }

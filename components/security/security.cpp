@@ -1,7 +1,7 @@
 #include "security.hpp"
 #include "esp_log.h"
 
-namespace monimesh {
+namespace wetzelmesh {
 static const char* TAG = "Security";
 
 std::vector<uint8_t> Security::hmacSha256(const std::string& key, const std::string& data) {

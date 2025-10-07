@@ -4,7 +4,7 @@
 #include <unordered_map>
 #include <string>
 
-namespace monimesh {
+namespace wetzelmesh {
 struct Message {
     uint16_t map_id;
     std::string payload;

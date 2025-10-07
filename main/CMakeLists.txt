@@ -4,8 +4,9 @@ idf_component_register(
     REQUIRES
         mesh_transport
         uart_bridge
-        cbor_codec
+        json_codec
         interpreters
         mqtt_gateway
         security
 )
+

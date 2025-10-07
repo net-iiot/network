@@ -1,7 +1,7 @@
 #include "interpreter_registry.hpp"
 #include "esp_log.h"
 
-namespace monimesh {
+namespace wetzelmesh {
 static const char* TAG = "InterpreterRegistry";
 
 InterpreterRegistry& InterpreterRegistry::instance() {

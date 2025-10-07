@@ -1,7 +1,7 @@
 #include "interpreter_registry.hpp"
 #include "esp_log.h"
 
-namespace monimesh {
+namespace wetzelmesh {
 static const char* TAG = "TelemetryV1";
 
 static void telemetryHandler(const Message& msg) {
