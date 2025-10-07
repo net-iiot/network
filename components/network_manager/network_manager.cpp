@@ -10,9 +10,11 @@ using namespace WetzelMesh;
 
 static const char *TAG = "NETMAN";
 std::vector<Neighbor> NetworkManager::neighbors;
+bool NetworkManager::gatewayMode = false;
 
-void NetworkManager::init()
-{
+void NetworkManager::init(bool isGateway) {
+    gatewayMode = isGateway;
+    ESP_LOGI(TAG, "Network Manager inicializado (%s)", isGateway ? "Gateway" : "Node");
     ESP_LOGI(TAG, "Inicializando Network Manager...");
     scan_neighbors();
 

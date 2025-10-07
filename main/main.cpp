@@ -1,19 +1,16 @@
-#include <string>
-#include "esp_log.h"
-#include "esp_mac.h" // ✅ necessário agora
-#include "esp_system.h"
-#include "nvs_flash.h"
-
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-
+#include "esp_log.h"
+#include "esp_mac.h"
+#include "nvs_flash.h"
+#include "led_manager.hpp"
 #include "protocol.hpp"
 #include "router.hpp"
-#include "gateway.hpp"
-#include "ble_transport.hpp"
 #include "network_manager.hpp"
 
-static const char *TAG = "APP";
+using namespace WetzelMesh;
+
+static const char *TAG = "WETZELMESH";
 
 extern "C" void app_main(void)
 {
@@ -21,41 +18,22 @@ extern "C" void app_main(void)
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND)
     {
         ESP_ERROR_CHECK(nvs_flash_erase());
-        ESP_ERROR_CHECK(nvs_flash_init());
+        ret = nvs_flash_init();
     }
+    ESP_ERROR_CHECK(ret);
 
-    ESP_LOGI(TAG, "============================================");
-    ESP_LOGI(TAG, "   WetzelMesh - Sistema de Comunicação Mesh  ");
-    ESP_LOGI(TAG, "============================================");
+    const bool isGateway = false;
 
-    ESP_LOGI(TAG, "Inicializando Router...");
-    WetzelMesh::Router::init();
+    LedManager::init(isGateway);
+    ESP_LOGI(TAG, "LED Manager inicializado");
 
-    ESP_LOGI(TAG, "Inicializando Gateway UART...");
-    WetzelMesh::Gateway::init();
+    Router::init();
+    NetworkManager::init(isGateway);
 
-    ESP_LOGI(TAG, "Inicializando BLE Mesh Transport...");
-    WetzelMesh::BLETransport::init();
-
-    WetzelMesh::Protocol::Packet pkt;
-    pkt.type = WetzelMesh::Protocol::PacketType::REQUEST;
-    pkt.route.src = "node-01";
-    pkt.route.dst = "gateway";
-    pkt.method = "POST";
-    pkt.endpoint = "/api/telemetry";
-    pkt.body = R"({"temperature": 24.5, "humidity": 62, "voltage": 3.78})";
-
-    ESP_LOGI(TAG, "Enviando pacote automatico...");
-    WetzelMesh::Router::handle_packet(pkt);
-
-    ESP_LOGI(TAG, "Inicializando Network Manager...");
-    WetzelMesh::NetworkManager::init();
-
-    ESP_LOGI(TAG, "Sistema WetzelMesh inicializado com sucesso!");
-    ESP_LOGI(TAG, "Aguardando pacotes da rede...");
+    ESP_LOGI(TAG, "WetzelMesh pronto: modo %s", isGateway ? "Gateway" : "Node");
 
     while (true)
     {
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        vTaskDelay(pdMS_TO_TICKS(5000));
     }
 }

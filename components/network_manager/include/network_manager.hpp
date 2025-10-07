@@ -15,7 +15,7 @@ namespace WetzelMesh
     class NetworkManager
     {
     public:
-        static void init();
+        static void init(bool isGateway);
         static void broadcast(const Protocol::Packet &packet);
         static void handle_incoming(const Protocol::Packet &packet);
         static const std::vector<Neighbor> &get_neighbors();
@@ -24,6 +24,7 @@ namespace WetzelMesh
         static std::vector<Neighbor> neighbors;
         static void scan_neighbors();
         static void on_ble_message(const std::string &json);
+        static bool gatewayMode;
     };
 
 } // namespace WetzelMesh
