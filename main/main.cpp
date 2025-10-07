@@ -1,110 +1,72 @@
 #include <string>
-#include <vector>
-
-extern "C"
-{
 #include "esp_log.h"
-#include "esp_system.h"
 #include "esp_mac.h"
-#include "nvs_flash.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-}
+#include "esp_system.h"
+//#include "nvs_flash.h"
 
-#include "uart_bridge.hpp"
-#include "interpreter.hpp"
-#include "mesh_transport.hpp"
+#include "protocol.hpp"
+// #include "router.hpp"
+// #include "gateway.hpp"
+// #include "ble_transport.hpp"
 
-using wetzelmesh::UARTBridge;
-using wetzelmesh::Interpreter;
-using wetzelmesh::MeshTransport;
+static const char *TAG = "APP";
 
-static const char *TAG = "NODE";
-
-/* ==========================================================
-   HANDLERS DO NODE
-   ========================================================== */
-static void register_node_handlers(Interpreter &it)
-{
-    // Handler para ligar o LED (simulado)
-    it.registerHandler("led", "on", [](const cJSON *payload) -> cJSON *
-                       {
-        ESP_LOGI("HANDLER", "LED ON recebido do Gateway");
-        cJSON* resp = cJSON_CreateObject();
-        cJSON_AddStringToObject(resp, "status", "LED ligado");
-        return resp; });
-
-    // Handler para desligar o LED
-    it.registerHandler("led", "off", [](const cJSON *payload) -> cJSON *
-                       {
-        ESP_LOGI("HANDLER", "LED OFF recebido do Gateway");
-        cJSON* resp = cJSON_CreateObject();
-        cJSON_AddStringToObject(resp, "status", "LED desligado");
-        return resp; });
-
-    ESP_LOGI(TAG, "Handlers do Node registrados");
-}
-
-/* ==========================================================
-   FUNÇÃO PRINCIPAL
-   ========================================================== */
+/* ======================================================
+ *  FUNÇÃO PRINCIPAL
+ * ====================================================== */
 extern "C" void app_main(void)
 {
-    esp_err_t ret = nvs_flash_init();
-    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND)
+    // ==============================
+    // 🔧 Inicialização do sistema
+    // ==============================
+    // esp_err_t ret = nvs_flash_init();
+    // if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND)
+    // {
+    //     nvs_flash_erase();
+    //     nvs_flash_init();
+    // }
+
+    ESP_LOGI(TAG, "================================================");
+    ESP_LOGI(TAG, " WETZELMESH - Sistema inicializando...");
+    ESP_LOGI(TAG, "================================================");
+
+    // ==============================
+    // 🧠 Inicialização dos módulos
+    // ==============================
+    ESP_LOGI(TAG, "Inicializando protocolo JSON...");
+    // Aqui apenas validamos o módulo protocol por enquanto
+    auto pkt = Protocol::make_request(
+        "node-01", "gateway", "POST", "/api/telemetry",
+        R"({"temperature":25.4,"humidity":61,"voltage":3.79})"
+    );
+
+    std::string jsonStr = Protocol::serialize(pkt);
+    ESP_LOGI(TAG, "Pacote serializado: %s", jsonStr.c_str());
+
+    Protocol::Packet parsed;
+    if (Protocol::parse(jsonStr, parsed))
     {
-        nvs_flash_erase();
-        nvs_flash_init();
+        ESP_LOGI(TAG, "Pacote analisado com sucesso:");
+        ESP_LOGI(TAG, "  Type: %d", static_cast<int>(parsed.type));
+        ESP_LOGI(TAG, "  Route: %s -> %s", parsed.route.src.c_str(), parsed.route.dst.c_str());
+        ESP_LOGI(TAG, "  Endpoint: %s", parsed.endpoint.c_str());
+        ESP_LOGI(TAG, "  Body: %s", parsed.body.c_str());
+    }
+    else
+    {
+        ESP_LOGE(TAG, "Falha ao interpretar pacote JSON!");
     }
 
-    ESP_LOGI(TAG, "WetzelMesh Node inicializando...");
+    // ==============================
+    // 🚀 Inicialização futura dos módulos de comunicação
+    // ==============================
+    // Router::init();
+    // Gateway::init_uart();
+    // Gateway::start_http_loop();
+    // BLETransport::start_mesh();
+    // Essas funções entrarão nas próximas etapas.
 
-    // Inicializa o transporte UART
-    static MeshTransport transport;
-    transport.init();
-
-    // Cria o intérprete
-    static Interpreter interpreter;
-    register_node_handlers(interpreter);
-
-    // Define o handler de mensagens recebidas do gateway
-    transport.setRxHandler([&](const std::string &json)
-                           {
-        std::string response;
-        interpreter.handleMessage(json, response);
-        if (!response.empty()) {
-            transport.send(response);
-        } });
-
-    // Task para envio de telemetria periódica
-    xTaskCreate([](void *arg)
-                {
-        MeshTransport* t = static_cast<MeshTransport*>(arg);
-        int counter = 0;
-
-        while (true) {
-            cJSON* root = cJSON_CreateObject();
-            cJSON_AddStringToObject(root, "type", "command");
-            cJSON_AddStringToObject(root, "target", "telemetry");
-            cJSON_AddStringToObject(root, "action", "push");
-            cJSON_AddNumberToObject(root, "id", counter++);
-
-            cJSON* payload = cJSON_CreateObject();
-            cJSON_AddNumberToObject(payload, "temperature", 22.0 + (rand() % 100) / 10.0);
-            cJSON_AddNumberToObject(payload, "humidity", 55.0 + (rand() % 200) / 10.0);
-            cJSON_AddNumberToObject(payload, "battery", 3.7 + (rand() % 20) / 100.0);
-            cJSON_AddItemToObject(root, "payload", payload);
-
-            char* s = cJSON_PrintUnformatted(root);
-            std::string out = s ? s : "{}";
-            if (s) cJSON_free(s);
-            cJSON_Delete(root);
-
-            ESP_LOGI("TX_TASK", "Enviando telemetria...");
-            t->send(out);
-
-            vTaskDelay(pdMS_TO_TICKS(5000)); // a cada 5 segundos
-        } }, "telemetry_task", 4096, &transport, 5, nullptr);
-
-    ESP_LOGI(TAG, "Node pronto e transmitindo dados");
+    ESP_LOGI(TAG, "================================================");
+    ESP_LOGI(TAG, " Sistema WetzelMesh inicializado com sucesso!");
+    ESP_LOGI(TAG, "================================================");
 }
