@@ -30,7 +30,6 @@ extern "C" void app_main(void)
     NetworkManager::init(kIsGateway);
     WetzelMesh::start_test_generation();
 
-
     ESP_LOGI(TAG, "WetzelMesh pronto: modo %s", kIsGateway ? "Gateway" : "Node");
 
     while (true)
