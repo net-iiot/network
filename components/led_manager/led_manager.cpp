@@ -1,42 +1,37 @@
 #include "led_manager.hpp"
-#include "esp_log.h"
+#include "driver/gpio.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
-using namespace WetzelMesh;
-
-gpio_num_t LedManager::dataLedPin = GPIO_NUM_NC;
-gpio_num_t LedManager::connectionLedPin = GPIO_NUM_NC;
-bool LedManager::gatewayMode = false;
-
-void LedManager::init(bool isGateway)
+namespace WetzelMesh
 {
-    gatewayMode = isGateway;
-    dataLedPin = isGateway ? GPIO_NUM_27 : GPIO_NUM_26;
-    connectionLedPin = isGateway ? GPIO_NUM_NC : GPIO_NUM_25;
+    static gpio_num_t kLedTraffic = GPIO_NUM_27; // gateway
+    static gpio_num_t kLedNodeA = GPIO_NUM_26;   // node
+    static gpio_num_t kLedNodeB = GPIO_NUM_25;   // node
 
-    gpio_reset_pin(dataLedPin);
-    gpio_set_direction(dataLedPin, GPIO_MODE_OUTPUT);
+    static bool s_isGateway = false;
 
-    if (!isGateway)
+    void LedManager::init(bool isGateway)
     {
-        gpio_reset_pin(connectionLedPin);
-        gpio_set_direction(connectionLedPin, GPIO_MODE_OUTPUT);
-        gpio_set_level(connectionLedPin, 0);
+        s_isGateway = isGateway;
+        gpio_config_t io = {};
+        io.intr_type = GPIO_INTR_DISABLE;
+        io.mode = GPIO_MODE_OUTPUT;
+        io.pin_bit_mask = (1ULL << kLedTraffic) | (1ULL << kLedNodeA) | (1ULL << kLedNodeB);
+        io.pull_down_en = GPIO_PULLDOWN_DISABLE;
+        io.pull_up_en = GPIO_PULLUP_DISABLE;
+        gpio_config(&io);
+
+        gpio_set_level(kLedTraffic, 0);
+        gpio_set_level(kLedNodeA, 0);
+        gpio_set_level(kLedNodeB, 0);
     }
 
-    ESP_LOGI("LedManager", "LEDs inicializados (modo: %s)", isGateway ? "Gateway" : "Node");
-}
-
-void LedManager::blinkDataLed()
-{
-    gpio_set_level(dataLedPin, 1);
-    vTaskDelay(pdMS_TO_TICKS(80));
-    gpio_set_level(dataLedPin, 0);
-}
-
-void LedManager::setConnectionLed(bool connected)
-{
-    if (!gatewayMode && connectionLedPin != GPIO_NUM_NC)
+    void LedManager::blink()
     {
-        gpio_set_level(connectionLedPin, connected ? 1 : 0);
+        gpio_num_t led = s_isGateway ? kLedTraffic : kLedNodeA;
+        gpio_set_level(led, 1);
+        vTaskDelay(pdMS_TO_TICKS(30));
+        gpio_set_level(led, 0);
     }
 }

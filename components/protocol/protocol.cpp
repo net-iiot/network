@@ -3,111 +3,116 @@
 
 namespace WetzelMesh::Protocol
 {
-
     static const char *typeToString(PacketType type)
     {
         switch (type)
         {
         case PacketType::REQUEST:
-            return "request";
+            return "REQUEST";
         case PacketType::RESPONSE:
-            return "response";
+            return "RESPONSE";
         case PacketType::EVENT:
-            return "event";
+            return "EVENT";
         default:
-            return "unknown";
+            return "UNKNOWN";
         }
     }
 
     static PacketType stringToType(const std::string &str)
     {
-        if (str == "request")
+        if (str == "REQUEST")
             return PacketType::REQUEST;
-        if (str == "response")
+        if (str == "RESPONSE")
             return PacketType::RESPONSE;
-        if (str == "event")
+        if (str == "EVENT")
             return PacketType::EVENT;
         return PacketType::UNKNOWN;
     }
 
-    bool parse(const std::string &jsonStr, Packet &outPacket)
+    bool parse(const std::string &jsonStr, Packet &out)
     {
         cJSON *root = cJSON_Parse(jsonStr.c_str());
         if (!root)
             return false;
 
-        cJSON *type = cJSON_GetObjectItem(root, "type");
-        cJSON *route = cJSON_GetObjectItem(root, "route");
-        cJSON *body = cJSON_GetObjectItem(root, "body");
+        auto cleanup = [&]()
+        { cJSON_Delete(root); };
 
-        if (!type || !route)
+        cJSON *jtype = cJSON_GetObjectItem(root, "type");
+        cJSON *jsrc = cJSON_GetObjectItem(root, "src");
+        cJSON *jdst = cJSON_GetObjectItem(root, "dst");
+        cJSON *jmethod = cJSON_GetObjectItem(root, "method");
+        cJSON *jendpoint = cJSON_GetObjectItem(root, "endpoint");
+        cJSON *jstatus = cJSON_GetObjectItem(root, "status");
+        cJSON *jbody = cJSON_GetObjectItem(root, "body");
+
+        if (!cJSON_IsString(jtype) || !cJSON_IsString(jsrc) || !cJSON_IsString(jdst))
         {
-            cJSON_Delete(root);
+            cleanup();
             return false;
         }
 
-        outPacket.type = stringToType(type->valuestring);
-        outPacket.route.src = cJSON_GetObjectItem(route, "src")->valuestring;
-        outPacket.route.dst = cJSON_GetObjectItem(route, "dst")->valuestring;
+        out.type = stringToType(jtype->valuestring);
+        out.route.src = jsrc->valuestring;
+        out.route.dst = jdst->valuestring;
 
-        cJSON *method = cJSON_GetObjectItem(root, "method");
-        if (method)
-            outPacket.method = method->valuestring;
+        if (jmethod && cJSON_IsString(jmethod))
+            out.method = jmethod->valuestring;
+        if (jendpoint && cJSON_IsString(jendpoint))
+            out.endpoint = jendpoint->valuestring;
+        if (jstatus && cJSON_IsNumber(jstatus))
+            out.status = jstatus->valuedouble;
 
-        cJSON *endpoint = cJSON_GetObjectItem(root, "endpoint");
-        if (endpoint)
-            outPacket.endpoint = endpoint->valuestring;
+        if (jbody)
+        {
+            if (cJSON_IsString(jbody))
+                out.body = jbody->valuestring;
+            else
+            {
+                // Se "body" vier como objeto/array, embala como string compacta
+                char *printed = cJSON_PrintUnformatted(jbody);
+                if (printed)
+                {
+                    out.body = printed;
+                    cJSON_free(printed);
+                }
+            }
+        }
 
-        cJSON *status = cJSON_GetObjectItem(root, "status");
-        if (status)
-            outPacket.status = status->valueint;
-
-        if (body)
-            outPacket.body = cJSON_PrintUnformatted(body);
-        else
-            outPacket.body = "{}";
-
-        cJSON_Delete(root);
+        cleanup();
         return true;
     }
 
-    std::string serialize(const Packet &pkt)
+    std::string serialize(const Packet &p)
     {
         cJSON *root = cJSON_CreateObject();
-        cJSON_AddStringToObject(root, "type", typeToString(pkt.type));
+        cJSON_AddStringToObject(root, "type", typeToString(p.type));
+        cJSON_AddStringToObject(root, "src", p.route.src.c_str());
+        cJSON_AddStringToObject(root, "dst", p.route.dst.c_str());
+        if (!p.method.empty())
+            cJSON_AddStringToObject(root, "method", p.method.c_str());
+        if (!p.endpoint.empty())
+            cJSON_AddStringToObject(root, "endpoint", p.endpoint.c_str());
+        if (p.status != 0)
+            cJSON_AddNumberToObject(root, "status", p.status);
 
-        cJSON *route = cJSON_CreateObject();
-        cJSON_AddStringToObject(route, "src", pkt.route.src.c_str());
-        cJSON_AddStringToObject(route, "dst", pkt.route.dst.c_str());
-        cJSON_AddItemToObject(root, "route", route);
-
-        if (pkt.type == PacketType::REQUEST)
+        // body pode ser string JSON válida — tentamos parsear; se falhar, vai como string
+        cJSON *parsed = cJSON_Parse(p.body.c_str());
+        if (parsed)
         {
-            cJSON_AddStringToObject(root, "method", pkt.method.c_str());
-            cJSON_AddStringToObject(root, "endpoint", pkt.endpoint.c_str());
-        }
-
-        if (pkt.type == PacketType::RESPONSE)
-        {
-            cJSON_AddNumberToObject(root, "status", pkt.status);
-        }
-
-        cJSON *bodyJson = cJSON_Parse(pkt.body.c_str());
-        if (bodyJson)
-        {
-            cJSON_AddItemToObject(root, "body", bodyJson);
+            cJSON_AddItemToObject(root, "body", parsed);
         }
         else
         {
-            cJSON_AddStringToObject(root, "body", pkt.body.c_str());
+            cJSON_AddStringToObject(root, "body", p.body.c_str());
         }
 
-        char *out = cJSON_PrintUnformatted(root);
-        std::string result(out);
-        cJSON_free(out);
+        char *printed = cJSON_PrintUnformatted(root);
+        std::string out = printed ? printed : "{}";
+        if (printed)
+            cJSON_free(printed);
         cJSON_Delete(root);
-
-        return result;
+        return out;
     }
 
     Packet make_request(const std::string &src, const std::string &dst,
@@ -134,4 +139,4 @@ namespace WetzelMesh::Protocol
         return pkt;
     }
 
-}
+} // namespace WetzelMesh::Protocol

@@ -3,48 +3,51 @@
 #include "gateway.hpp"
 #include "ble_transport.hpp"
 #include "network_manager.hpp"
+#include "led_manager.hpp"
 
 using namespace WetzelMesh;
+
 static const char *TAG = "ROUTER";
 
 void Router::init()
 {
-    ESP_LOGI(TAG, "Router iniciado com sucesso.");
+    ESP_LOGI(TAG, "Router iniciado");
 }
 
 void Router::handle_packet(const Protocol::Packet &packet)
 {
-    ESP_LOGI(TAG, "📦 Recebido pacote de %s → %s (%s)",
-             packet.route.src.c_str(),
-             packet.route.dst.c_str(),
-             packet.endpoint.c_str());
+    // Atualiza LED de tráfego
+    LedManager::blink();
 
-    // Se o destino é o gateway → envia via UART
-    if (packet.route.dst == "gateway")
+    const bool is_gateway = NetworkManager::is_gateway();
+    const std::string &dst = packet.route.dst;
+
+    // Se sou o destino "gateway" e sou gateway -> UART/servidor
+    if (dst == "gateway" && is_gateway)
     {
-        ESP_LOGI(TAG, "🔁 Encaminhando para gateway via UART...");
+        ESP_LOGI(TAG, "Destino é o GATEWAY local → UART");
         Gateway::send(packet);
         return;
     }
 
-    // Se o destino é broadcast → envia para todos os vizinhos BLE
-    if (packet.route.dst == "broadcast")
+    // Se destino for outro nó/flutter → retransmite por BLE
+    if (dst == "flutter" || dst.rfind("node-", 0) == 0)
     {
-        ESP_LOGI(TAG, "📡 Broadcast para rede BLE...");
-        NetworkManager::broadcast(packet);
-        return;
-    }
-
-    // Se é outro nó BLE específico
-    if (packet.route.dst.find("node-") == 0)
-    {
-        ESP_LOGI(TAG, "➡️ Encaminhando via BLE para %s", packet.route.dst.c_str());
+        ESP_LOGI(TAG, "Encaminhando por BLE para destino: %s", dst.c_str());
         BLETransport::send(packet);
         return;
     }
 
-    // Se é local → processar (por enquanto só loga)
-    ESP_LOGI(TAG, "📍 Pacote destinado a este nó, processando localmente...");
+    // Caso contrário, se sou node e destino é gateway → BLE
+    if (!is_gateway && dst == "gateway")
+    {
+        ESP_LOGI(TAG, "Sou node e destino é o gateway → BLE");
+        BLETransport::send(packet);
+        return;
+    }
+
+    // Pacote local (não há outro destino claro) — por enquanto apenas loga
+    ESP_LOGI(TAG, "📍 Pacote para processamento local: %s %s", packet.method.c_str(), packet.endpoint.c_str());
 }
 
 void Router::send_to(const Protocol::Packet &packet, const std::string &target)

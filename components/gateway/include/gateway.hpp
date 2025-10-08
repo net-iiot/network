@@ -1,12 +1,10 @@
 #pragma once
 #include <string>
-#include "esp_log.h"
 #include "driver/uart.h"
 #include "protocol.hpp"
 
 namespace WetzelMesh
 {
-
     class Gateway
     {
     public:
@@ -19,6 +17,6 @@ namespace WetzelMesh
         static constexpr int TX_PIN = 13;
         static constexpr int RX_PIN = 15;
         static constexpr int BUF_SIZE = 2048;
+        static constexpr int BAUD = 115200;
     };
-
 } // namespace WetzelMesh

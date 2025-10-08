@@ -1,49 +1,55 @@
 #include "json_codec.hpp"
-#include "esp_log.h"
+#include "cJSON.h"
 
-namespace wetzelmesh
+namespace WetzelMesh
 {
-
-    static const char *TAG = "JSONCodec";
-
-    std::string JSONCodec::encode(const char *type, const char *payload)
+    std::string JSONCodec::wrap(const std::string &type, const std::string &payload)
     {
         cJSON *root = cJSON_CreateObject();
-        cJSON_AddStringToObject(root, "type", type);
-        cJSON_AddStringToObject(root, "payload", payload);
+        cJSON_AddStringToObject(root, "type", type.c_str());
 
-        char *json_str = cJSON_PrintUnformatted(root);
-        std::string result(json_str);
-        cJSON_free(json_str);
+        cJSON *parsed = cJSON_Parse(payload.c_str());
+        if (parsed)
+            cJSON_AddItemToObject(root, "payload", parsed);
+        else
+            cJSON_AddStringToObject(root, "payload", payload.c_str());
+
+        char *printed = cJSON_PrintUnformatted(root);
+        std::string out = printed ? printed : "{}";
+        if (printed)
+            cJSON_free(printed);
         cJSON_Delete(root);
-
-        ESP_LOGI(TAG, "Encoded JSON: %s", result.c_str());
-        return result;
+        return out;
     }
 
-    bool JSONCodec::decode(const std::string &json, std::string &type, std::string &payload)
+    bool JSONCodec::unwrap(const std::string &json, std::string &type, std::string &payload)
     {
         cJSON *root = cJSON_Parse(json.c_str());
         if (!root)
+            return false;
+
+        auto cleanup = [&]()
+        { cJSON_Delete(root); };
+        cJSON *jtype = cJSON_GetObjectItem(root, "type");
+        cJSON *jpay = cJSON_GetObjectItem(root, "payload");
+        if (!cJSON_IsString(jtype) || !jpay)
         {
-            ESP_LOGE(TAG, "Failed to parse JSON");
+            cleanup();
             return false;
         }
 
-        cJSON *type_item = cJSON_GetObjectItem(root, "type");
-        cJSON *payload_item = cJSON_GetObjectItem(root, "payload");
+        type = jtype->valuestring;
 
-        if (cJSON_IsString(type_item) && cJSON_IsString(payload_item))
+        if (cJSON_IsString(jpay))
+            payload = jpay->valuestring;
+        else
         {
-            type = type_item->valuestring;
-            payload = payload_item->valuestring;
-            cJSON_Delete(root);
-            return true;
+            char *printed = cJSON_PrintUnformatted(jpay);
+            payload = printed ? printed : "{}";
+            if (printed)
+                cJSON_free(printed);
         }
-
-        cJSON_Delete(root);
-        ESP_LOGE(TAG, "Invalid JSON format");
-        return false;
+        cleanup();
+        return true;
     }
-
-} // namespace monimesh
+} // namespace WetzelMesh

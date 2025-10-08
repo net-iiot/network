@@ -9,45 +9,69 @@
 using namespace WetzelMesh;
 
 static const char *TAG = "NETMAN";
-std::vector<Neighbor> NetworkManager::neighbors;
-bool NetworkManager::gatewayMode = false;
 
-void NetworkManager::init(bool isGateway) {
-    gatewayMode = isGateway;
+bool NetworkManager::s_gateway = false;
+std::vector<Neighbor> NetworkManager::s_neighbors;
+
+void NetworkManager::init(bool isGateway)
+{
+    s_gateway = isGateway;
+
+    BLETransport::init(isGateway);
+    if (s_gateway)
+        Gateway::init();
+
+    xTaskCreatePinnedToCore(&NetworkManager::refresh_neighbors_task, "neighbors", 4096, nullptr, 4, nullptr, 0);
+
     ESP_LOGI(TAG, "Network Manager inicializado (%s)", isGateway ? "Gateway" : "Node");
-    ESP_LOGI(TAG, "Inicializando Network Manager...");
-    scan_neighbors();
-
-    // Aqui você pode criar uma task futura para atualizar a tabela periodicamente
-    ESP_LOGI(TAG, "Network Manager inicializado.");
 }
 
-void NetworkManager::scan_neighbors()
+void NetworkManager::refresh_neighbors_task(void *param)
 {
-    // Aqui simulamos vizinhos descobertos na malha BLE
-    neighbors.clear();
-    neighbors.push_back({"node-02", -55});
-    neighbors.push_back({"node-03", -60});
-    ESP_LOGI(TAG, "Nós vizinhos detectados: %d", (int)neighbors.size());
-}
-
-void NetworkManager::broadcast(const Protocol::Packet &packet)
-{
-    ESP_LOGI(TAG, "🔊 Broadcast para %d vizinhos", (int)neighbors.size());
-    for (auto &n : neighbors)
+    // Stub de descoberta — numa malha real, populamos a partir de scan/conexões
+    for (;;)
     {
-        ESP_LOGI(TAG, "→ Enviando pacote para %s via BLE", n.id.c_str());
+        s_neighbors.clear();
+        s_neighbors.push_back({BLETransport::node_id(), -40});
+        vTaskDelay(pdMS_TO_TICKS(3000));
+    }
+}
+
+bool NetworkManager::is_gateway()
+{
+    return s_gateway;
+}
+
+const std::vector<Neighbor> &NetworkManager::neighbors()
+{
+    return s_neighbors;
+}
+
+void NetworkManager::send(const Protocol::Packet &packet)
+{
+    // Decisão de rota
+    if (s_gateway)
+    {
+        // Gateway roteia para BLE (para nós) ou processa local
+        if (packet.route.dst == "flutter" || packet.route.dst.rfind("node-", 0) == 0)
+        {
+            BLETransport::send(packet);
+        }
+        else
+        {
+            // Mensagem ao servidor? Aqui normalmente seria via UART → servidor real
+            Gateway::send(packet);
+        }
+    }
+    else
+    {
+        // Node: se destino é "gateway" → BLE; senão broadcast BLE
         BLETransport::send(packet);
     }
 }
 
 void NetworkManager::handle_incoming(const Protocol::Packet &packet)
 {
-    ESP_LOGI(TAG, "📥 Pacote recebido de %s", packet.route.src.c_str());
+    ESP_LOGI(TAG, "📥 Pacote recebido (%s -> %s)", packet.route.src.c_str(), packet.route.dst.c_str());
     Router::handle_packet(packet);
-}
-
-const std::vector<Neighbor> &NetworkManager::get_neighbors()
-{
-    return neighbors;
 }

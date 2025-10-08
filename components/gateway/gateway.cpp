@@ -1,65 +1,69 @@
 #include "gateway.hpp"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "esp_log.h"
 #include "router.hpp"
 
 using namespace WetzelMesh;
+
 static const char *TAG = "GATEWAY";
 
 void Gateway::init()
 {
     ESP_LOGI(TAG, "Inicializando UART do gateway...");
 
-    uart_config_t uart_config = {
-        .baud_rate = 115200,
-        .data_bits = UART_DATA_8_BITS,
-        .parity = UART_PARITY_DISABLE,
-        .stop_bits = UART_STOP_BITS_1,
-        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
-        .source_clk = UART_SCLK_DEFAULT,
-    };
+    uart_config_t cfg = {};
+    cfg.baud_rate = BAUD;
+    cfg.data_bits = UART_DATA_8_BITS;
+    cfg.parity = UART_PARITY_DISABLE;
+    cfg.stop_bits = UART_STOP_BITS_1;
+    cfg.flow_ctrl = UART_HW_FLOWCTRL_DISABLE;
 
-    ESP_ERROR_CHECK(uart_driver_install(UART_PORT, BUF_SIZE * 2, BUF_SIZE * 2, 0, NULL, 0));
-    ESP_ERROR_CHECK(uart_param_config(UART_PORT, &uart_config));
+    ESP_ERROR_CHECK(uart_driver_install(UART_PORT, BUF_SIZE, BUF_SIZE, 0, nullptr, 0));
+    ESP_ERROR_CHECK(uart_param_config(UART_PORT, &cfg));
     ESP_ERROR_CHECK(uart_set_pin(UART_PORT, TX_PIN, RX_PIN, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
 
-    // Cria task para receber dados
-    xTaskCreate(listen_task, "gateway_uart_rx", 4096, NULL, 5, NULL);
-
-    ESP_LOGI(TAG, "Gateway UART inicializado (TX=%d, RX=%d)", TX_PIN, RX_PIN);
+    xTaskCreatePinnedToCore(&Gateway::listen_task, "uart_listen", 4096, nullptr, 5, nullptr, 1);
 }
 
 void Gateway::send(const Protocol::Packet &packet)
 {
     std::string json = Protocol::serialize(packet);
-    uart_write_bytes(UART_PORT, json.c_str(), json.length());
-    uart_write_bytes(UART_PORT, "\n", 1); // separador de pacotes
-    ESP_LOGI(TAG, "→ Enviado via UART: %s", json.c_str());
+    json.push_back('\n'); // framing simples (linha)
+    uart_write_bytes(UART_PORT, json.c_str(), json.size());
+    ESP_LOGI(TAG, "📤 UART -> servidor: %s", json.c_str());
 }
 
 void Gateway::listen_task(void *param)
 {
-    uint8_t data[BUF_SIZE];
+    uint8_t buf[BUF_SIZE];
+    std::string acc;
+
     while (true)
     {
-        int len = uart_read_bytes(UART_PORT, data, BUF_SIZE - 1, pdMS_TO_TICKS(200));
+        int len = uart_read_bytes(UART_PORT, buf, sizeof(buf), pdMS_TO_TICKS(50));
         if (len > 0)
         {
-            data[len] = '\0';
-            std::string json(reinterpret_cast<char *>(data));
-            ESP_LOGI(TAG, "← Recebido via UART: %s", json.c_str());
+            acc.append((const char *)buf, len);
+            // framing por linha
+            size_t pos;
+            while ((pos = acc.find('\n')) != std::string::npos)
+            {
+                std::string line = acc.substr(0, pos);
+                acc.erase(0, pos + 1);
 
-            Protocol::Packet packet;
-            if (Protocol::parse(json, packet))
-            {
-                ESP_LOGI(TAG, "Pacote UART válido recebido. Encaminhando ao Router...");
-                Router::handle_packet(packet);
-            }
-            else
-            {
-                ESP_LOGW(TAG, "Falha ao interpretar pacote recebido via UART.");
+                Protocol::Packet packet;
+                if (Protocol::parse(line, packet))
+                {
+                    ESP_LOGI(TAG, "📥 UART <- servidor: %s", line.c_str());
+                    Router::handle_packet(packet);
+                }
+                else
+                {
+                    ESP_LOGW(TAG, "Linha UART inválida: %s", line.c_str());
+                }
             }
         }
-        vTaskDelay(pdMS_TO_TICKS(50));
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
 }

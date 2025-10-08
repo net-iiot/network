@@ -4,7 +4,6 @@
 
 namespace WetzelMesh
 {
-
     class Router
     {
     public:
@@ -12,5 +11,4 @@ namespace WetzelMesh
         static void handle_packet(const Protocol::Packet &packet);
         static void send_to(const Protocol::Packet &packet, const std::string &target);
     };
-
 } // namespace WetzelMesh

@@ -5,26 +5,31 @@
 
 namespace WetzelMesh
 {
-
     struct Neighbor
     {
-        std::string id;
-        int rssi;
+        std::string id; // node-id
+        int rssi = 0;
     };
 
     class NetworkManager
     {
     public:
         static void init(bool isGateway);
-        static void broadcast(const Protocol::Packet &packet);
+
+        // Envio alto nível (decide BLE ou UART)
+        static void send(const Protocol::Packet &packet);
+
+        // Entrada da pilha quando chega algo (BLE/UART)
         static void handle_incoming(const Protocol::Packet &packet);
-        static const std::vector<Neighbor> &get_neighbors();
+
+        static const std::vector<Neighbor> &neighbors();
+
+        static bool is_gateway();
 
     private:
-        static std::vector<Neighbor> neighbors;
-        static void scan_neighbors();
-        static void on_ble_message(const std::string &json);
-        static bool gatewayMode;
-    };
+        static void refresh_neighbors_task(void *param);
 
+        static bool s_gateway;
+        static std::vector<Neighbor> s_neighbors;
+    };
 } // namespace WetzelMesh

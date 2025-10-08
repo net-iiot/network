@@ -1,7 +1,6 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
-#include "esp_mac.h"
 #include "nvs_flash.h"
 #include "led_manager.hpp"
 #include "protocol.hpp"
@@ -11,6 +10,7 @@
 using namespace WetzelMesh;
 
 static const char *TAG = "WETZELMESH";
+static constexpr bool kIsGateway = false;
 
 extern "C" void app_main(void)
 {
@@ -22,15 +22,13 @@ extern "C" void app_main(void)
     }
     ESP_ERROR_CHECK(ret);
 
-    const bool isGateway = false;
-
-    LedManager::init(isGateway);
+    LedManager::init(kIsGateway);
     ESP_LOGI(TAG, "LED Manager inicializado");
 
     Router::init();
-    NetworkManager::init(isGateway);
+    NetworkManager::init(kIsGateway);
 
-    ESP_LOGI(TAG, "WetzelMesh pronto: modo %s", isGateway ? "Gateway" : "Node");
+    ESP_LOGI(TAG, "WetzelMesh pronto: modo %s", kIsGateway ? "Gateway" : "Node");
 
     while (true)
     {
