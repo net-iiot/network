@@ -6,6 +6,7 @@
 #include "protocol.hpp"
 #include "router.hpp"
 #include "network_manager.hpp"
+#include "test_packet_generator.hpp"
 
 using namespace WetzelMesh;
 
@@ -27,6 +28,8 @@ extern "C" void app_main(void)
 
     Router::init();
     NetworkManager::init(kIsGateway);
+    WetzelMesh::start_test_generation();
+
 
     ESP_LOGI(TAG, "WetzelMesh pronto: modo %s", kIsGateway ? "Gateway" : "Node");
 

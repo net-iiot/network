@@ -5,6 +5,7 @@
 #include "router.hpp"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "led_manager.hpp"
 
 using namespace WetzelMesh;
 
@@ -70,8 +71,18 @@ void NetworkManager::send(const Protocol::Packet &packet)
     }
 }
 
+// void NetworkManager::handle_incoming(const Protocol::Packet &packet)
+// {
+//     ESP_LOGI(TAG, "📥 Pacote recebido (%s -> %s)", packet.route.src.c_str(), packet.route.dst.c_str());
+//     Router::handle_packet(packet);
+// }
+
 void NetworkManager::handle_incoming(const Protocol::Packet &packet)
 {
-    ESP_LOGI(TAG, "📥 Pacote recebido (%s -> %s)", packet.route.src.c_str(), packet.route.dst.c_str());
-    Router::handle_packet(packet);
+    ESP_LOGI("NETMAN", "Pacote recebido de %s para %s",
+             packet.route.src.c_str(),
+             packet.route.dst.c_str());
+    LedManager::on_packet_received();
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    NetworkManager::send(packet);
 }

@@ -34,4 +34,9 @@ namespace WetzelMesh
         vTaskDelay(pdMS_TO_TICKS(30));
         gpio_set_level(led, 0);
     }
+
+    void LedManager::on_packet_received()
+    {
+        blink();
+    }
 }
