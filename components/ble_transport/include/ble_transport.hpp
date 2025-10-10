@@ -11,7 +11,7 @@ namespace WetzelMesh
         static void init(bool isGateway);
         static bool send(const Protocol::Packet &packet);           // envia JSON pelo TX notify
         static void on_receive_json(const std::string &jsonString); // callback interno -> Router
-
+        static bool isGateway() { return s_isGateway; }
         // Opcional: obter nome do nó para src
         static std::string node_id();
 

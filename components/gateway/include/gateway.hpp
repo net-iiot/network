@@ -9,7 +9,7 @@ namespace WetzelMesh
     {
     public:
         static void init();
-        static void send(const Protocol::Packet &packet);
+        static bool send(const Protocol::Packet &packet);
         static void listen_task(void *param);
 
     private:

@@ -8,6 +8,9 @@
 #include "esp_gap_ble_api.h"
 #include "esp_gatts_api.h"
 #include "esp_gatt_common_api.h"
+#include "led_manager.hpp"
+#include "network_manager.hpp"
+#include "protocol.hpp"
 
 using namespace WetzelMesh;
 
@@ -26,7 +29,6 @@ bool BLETransport::s_isGateway = false;
 
 static std::string make_node_name()
 {
-    // Nome BLE curto (ex: "WM-AB12")
     uint8_t mac[6];
     esp_read_mac(mac, ESP_MAC_BT);
     char buf[16];
@@ -50,33 +52,77 @@ static void handle_write_evt(const uint8_t *value, uint16_t len)
     BLETransport::on_receive_json(json);
 }
 
-// Handlers GATTS muito simplificados
-static void gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if,
-                                esp_ble_gatts_cb_param_t *param)
+// -----------------------------------------------------------------------------
+// Handlers BLE
+// -----------------------------------------------------------------------------
+
+static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param)
 {
     switch (event)
     {
-    case ESP_GATTS_REG_EVT:
-        g_gatts_if = gatts_if;
-        esp_ble_gap_set_device_name(make_node_name().c_str());
-        esp_ble_gatts_create_attr_tab(nullptr, gatts_if, 0, 0); // usamos API direta abaixo
+    case ESP_GAP_BLE_ADV_START_COMPLETE_EVT:
+        ESP_LOGI("BLE", "Advertising iniciado");
         break;
-    case ESP_GATTS_WRITE_EVT:
-        if (param->write.handle == g_rx_handle && param->write.len > 0)
-            handle_write_evt(param->write.value, param->write.len);
+    case ESP_GAP_BLE_ADV_STOP_COMPLETE_EVT:
+        ESP_LOGI("BLE", "Advertising parado");
         break;
     default:
         break;
     }
 }
 
-static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param)
+static void gatts_event_handler(esp_gatts_cb_event_t event,
+                                esp_gatt_if_t gatts_if,
+                                esp_ble_gatts_cb_param_t *param)
 {
-    if (event == ESP_GAP_BLE_ADV_START_COMPLETE_EVT)
+    switch (event)
     {
-        ESP_LOGI(TAG, "Advertising iniciado");
+    case ESP_GATTS_REG_EVT:
+        ESP_LOGI(TAG, "GATT registrado (app_id=0x%x)", param->reg.app_id);
+        esp_ble_gap_set_device_name("WetzelMeshNode");
+        esp_ble_gap_start_advertising(nullptr);
+        break;
+
+    case ESP_GATTS_CONNECT_EVT:
+        ESP_LOGI(TAG, "📡 BLE conectado: conn_id=%d", param->connect.conn_id);
+        if (!BLETransport::isGateway())
+        {
+            LedManager::set_node_joined(true);
+        }
+        break;
+
+    case ESP_GATTS_DISCONNECT_EVT:
+        ESP_LOGW(TAG, "⚠️ BLE desconectado: conn_id=%d", param->disconnect.conn_id);
+        if (!BLETransport::isGateway())
+        {
+            LedManager::set_node_joined(false);
+        }
+        esp_ble_gap_start_advertising(nullptr);
+        break;
+
+    case ESP_GATTS_WRITE_EVT:
+        ESP_LOGD(TAG, "GATT WRITE recebido, len=%d", param->write.len);
+        if (param->write.len > 0)
+        {
+            std::string json(reinterpret_cast<char *>(param->write.value), param->write.len);
+            Protocol::Packet packet;
+            if (Protocol::parse(json, packet))
+            {
+                ESP_LOGI(TAG, "📩 BLE pacote RX: %s -> %s", packet.route.src.c_str(), packet.route.dst.c_str());
+                LedManager::on_packet_received();
+                NetworkManager::handle_incoming(packet);
+            }
+        }
+        break;
+
+    default:
+        break;
     }
 }
+
+// -----------------------------------------------------------------------------
+// Métodos BLETransport
+// -----------------------------------------------------------------------------
 
 void BLETransport::start_gap_gatt()
 {
@@ -88,10 +134,40 @@ void BLETransport::start_gap_gatt()
     }
     ESP_ERROR_CHECK(ret);
 
-    ESP_ERROR_CHECK(esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT));
+    esp_err_t err;
     esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_bt_controller_init(&bt_cfg));
-    ESP_ERROR_CHECK(esp_bt_controller_enable(ESP_BT_MODE_BLE));
+    bt_cfg.mode = ESP_BT_MODE_BLE;
+
+    ESP_LOGI(TAG, "BT: tentando BLE-only (liberando Classic)...");
+    err = esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT);
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE)
+    {
+        ESP_LOGW(TAG, "BT: mem_release Classic falhou (%s)", esp_err_to_name(err));
+    }
+
+    err = esp_bt_controller_init(&bt_cfg);
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE)
+    {
+        ESP_LOGE(TAG, "BT: controller_init (BLE) falhou: %s", esp_err_to_name(err));
+        ESP_ERROR_CHECK(err);
+    }
+
+    err = esp_bt_controller_enable(ESP_BT_MODE_BLE);
+    if (err == ESP_ERR_INVALID_ARG)
+    {
+        ESP_LOGW(TAG, "BT: enable(BLE) deu INVALID_ARG; fallback para BTDM...");
+        (void)esp_bt_controller_disable();
+        (void)esp_bt_controller_deinit();
+
+        bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
+        bt_cfg.mode = ESP_BT_MODE_BTDM;
+        ESP_ERROR_CHECK(esp_bt_controller_init(&bt_cfg));
+        ESP_ERROR_CHECK(esp_bt_controller_enable(ESP_BT_MODE_BTDM));
+    }
+    else
+    {
+        ESP_ERROR_CHECK(err);
+    }
 
     ESP_ERROR_CHECK(esp_bluedroid_init());
     ESP_ERROR_CHECK(esp_bluedroid_enable());
@@ -103,19 +179,12 @@ void BLETransport::start_gap_gatt()
 
 void BLETransport::setup_service()
 {
-    // Serviço + duas características: RX (Write) e TX (Notify)
     esp_gatt_srvc_id_t service_id = {};
     service_id.is_primary = true;
     service_id.id.inst_id = 0;
     service_id.id.uuid.len = ESP_UUID_LEN_128;
     memcpy(service_id.id.uuid.uuid.uuid128, SERVICE_UUID, 16);
     ESP_ERROR_CHECK(esp_ble_gatts_create_service(g_gatts_if, &service_id, 8));
-    // Simples: registramos handles após CREATE_SERVICE callback normalmente,
-    // mas para simplificar, vamos usar valores fixos via create_attr_tab em projetos reais.
-
-    // Aqui, para deixar o arquivo auto contido, vamos assumir que g_service_handle,
-    // g_tx_handle e g_rx_handle serão configurados por uma tabela de atributos no seu projeto.
-    // ⇒ Se preferir, troque por NimBLE (APIs mais simples) numa próxima iteração.
 }
 
 void BLETransport::start_advertising()
@@ -145,6 +214,10 @@ void BLETransport::init(bool isGateway)
     start_gap_gatt();
     setup_service();
     start_advertising();
+    if (!s_isGateway)
+    {
+        LedManager::set_node_joined(false);
+    }
 }
 
 void BLETransport::notify_tx(const std::string &data)
@@ -154,13 +227,12 @@ void BLETransport::notify_tx(const std::string &data)
         ESP_LOGW(TAG, "TX handle indisponível");
         return;
     }
-    esp_ble_gatts_send_indicate(g_gatts_if, 0 /*conn_id*/, g_tx_handle,
+    esp_ble_gatts_send_indicate(g_gatts_if, 0, g_tx_handle,
                                 data.size(), (uint8_t *)data.data(), false);
 }
 
 bool BLETransport::send(const Protocol::Packet &packet)
 {
-    // Para simplificar: enviamos broadcast por notify (num mesh real teríamos bridging entre nós).
     std::string json = Protocol::serialize(packet);
     ESP_LOGI(TAG, "📤 Enviando via BLE (notify): %s", json.c_str());
     notify_tx(json);
