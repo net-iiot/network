@@ -1,14 +1,12 @@
 #pragma once
-#include <string>
-#include "protocol.hpp"
+#include "protocol.hpp" 
+#include "espnow_transport.hpp"
+#include "led_manager.hpp"
 
-namespace WetzelMesh
-{
-    class Router
-    {
+namespace WetzelMesh {
+    class Router {
     public:
-        static void init();
-        static void handle_packet(const Protocol::Packet &packet);
-        static void send_to(const Protocol::Packet &packet, const std::string &target);
+        static void init(bool isGateway);
+        static void handle_packet(const Protocol::Packet &pkt);
     };
-} // namespace WetzelMesh
+}

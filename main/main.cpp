@@ -7,14 +7,24 @@
 #include "router.hpp"
 #include "network_manager.hpp"
 #include "test_packet_generator.hpp"
+#include "gateway.hpp" // FIX: faltava esse include
 
 using namespace WetzelMesh;
 
 static const char *TAG = "WETZELMESH";
-static constexpr bool kIsGateway = false;
 
 extern "C" void app_main(void)
 {
+    // Escolha do modo
+#ifdef CONFIG_WETZEL_IS_GATEWAY
+    constexpr bool kIsGateway = true;
+#else
+    constexpr bool kIsGateway = false;
+#endif
+
+    ESP_LOGI(TAG, "Iniciando WetzelMesh (%s)", kIsGateway ? "Gateway" : "Node");
+
+    // Inicializa NVS
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND)
     {
@@ -23,14 +33,22 @@ extern "C" void app_main(void)
     }
     ESP_ERROR_CHECK(ret);
 
+    // Inicializa subsistemas
     LedManager::init(kIsGateway);
     ESP_LOGI(TAG, "LED Manager inicializado");
 
-    Router::init();
+    Router::init(kIsGateway); // FIX: agora passa o parâmetro corretamente
     NetworkManager::init(kIsGateway);
-    WetzelMesh::start_test_generation();
 
-    ESP_LOGI(TAG, "WetzelMesh pronto: modo %s", kIsGateway ? "Gateway" : "Node");
+    if (kIsGateway)
+    {
+        Gateway::init(); // FIX: corrigido include e escopo
+    }
+
+    // Geração de pacotes de teste
+    start_test_generation();
+
+    ESP_LOGI(TAG, "WetzelMesh pronto no modo: %s", kIsGateway ? "Gateway" : "Node");
 
     while (true)
     {

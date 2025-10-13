@@ -1,15 +1,18 @@
 idf_component_register(
     SRCS "main.cpp"
     INCLUDE_DIRS "."
-    REQUIRES
-        json_codec
-        security
+    PRIV_REQUIRES
+        test_packet_generator
+        router
         protocol
-        router
-        gateway
-        router
-        ble_transport
         network_manager
         led_manager
+        ble_transport
+        espnow_transport
+        gateway
+        security
+        nvs_flash
+        esp_wifi
+        freertos
 )
-
+set_target_properties(${COMPONENT_LIB} PROPERTIES CXX_STANDARD 17)

@@ -6,6 +6,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "led_manager.hpp"
+#include "espnow_transport.hpp"
 
 using namespace WetzelMesh;
 
@@ -48,34 +49,11 @@ const std::vector<Neighbor> &NetworkManager::neighbors()
     return s_neighbors;
 }
 
-void NetworkManager::send(const Protocol::Packet &packet)
+bool NetworkManager::send(const Protocol::Packet &p)
 {
-    // Decisão de rota
-    if (s_gateway)
-    {
-        // Gateway roteia para BLE (para nós) ou processa local
-        if (packet.route.dst == "flutter" || packet.route.dst.rfind("node-", 0) == 0)
-        {
-            BLETransport::send(packet);
-        }
-        else
-        {
-            // Mensagem ao servidor? Aqui normalmente seria via UART → servidor real
-            Gateway::send(packet);
-        }
-    }
-    else
-    {
-        // Node: se destino é "gateway" → BLE; senão broadcast BLE
-        BLETransport::send(packet);
-    }
+    // Por ora, flooding simples na mesh
+    return ESPNOWTransport::send(p);
 }
-
-// void NetworkManager::handle_incoming(const Protocol::Packet &packet)
-// {
-//     ESP_LOGI(TAG, "📥 Pacote recebido (%s -> %s)", packet.route.src.c_str(), packet.route.dst.c_str());
-//     Router::handle_packet(packet);
-// }
 
 void NetworkManager::handle_incoming(const Protocol::Packet &packet)
 {

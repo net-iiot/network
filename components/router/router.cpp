@@ -1,58 +1,40 @@
 #include "router.hpp"
-#include "esp_log.h"
+#include "protocol.hpp"
 #include "gateway.hpp"
-#include "ble_transport.hpp"
 #include "network_manager.hpp"
 #include "led_manager.hpp"
+#include "espnow_transport.hpp"
+#include "esp_log.h"
 
-using namespace WetzelMesh;
-
-static const char *TAG = "ROUTER";
-
-void Router::init()
+namespace WetzelMesh
 {
-    ESP_LOGI(TAG, "Router iniciado");
-}
 
-void Router::handle_packet(const Protocol::Packet &packet)
-{
-    // Atualiza LED de tráfego
-    LedManager::blink();
+    static const char *TAG = "ROUTER";
 
-    const bool is_gateway = NetworkManager::is_gateway();
-    const std::string &dst = packet.route.dst;
-
-    // Se sou o destino "gateway" e sou gateway -> UART/servidor
-    if (dst == "gateway" && is_gateway)
+    void Router::init(bool isGateway)
     {
-        ESP_LOGI(TAG, "Destino é o GATEWAY local → UART");
-        Gateway::send(packet);
-        return;
+        (void)isGateway;         // por ora não usamos
+        ESPNOWTransport::init(); // inicia o transporte
     }
 
-    // Se destino for outro nó/flutter → retransmite por BLE
-    if (dst == "flutter" || dst.rfind("node-", 0) == 0)
+    void Router::handle_packet(const Protocol::Packet &pkt)
     {
-        ESP_LOGI(TAG, "Encaminhando por BLE para destino: %s", dst.c_str());
-        BLETransport::send(packet);
-        return;
+        // log sem tamanho (evita usar campo que não existe)
+        ESP_LOGI(TAG, "Roteando pacote: %s -> %s",
+                 pkt.route.src.c_str(), pkt.route.dst.c_str());
+
+        // pisca RX (esta existe no seu projeto)
+        LedManager::on_packet_received();
+
+        if (pkt.route.dst == "gateway")
+        {
+            Gateway::send(pkt);
+            // LedManager::on_packet_sent(); // <- remover/ comentar: função não existe
+            return;
+        }
+
+        NetworkManager::send(pkt);
+        // LedManager::on_packet_sent();     // <- remover/ comentar
     }
 
-    // Caso contrário, se sou node e destino é gateway → BLE
-    if (!is_gateway && dst == "gateway")
-    {
-        ESP_LOGI(TAG, "Sou node e destino é o gateway → BLE");
-        BLETransport::send(packet);
-        return;
-    }
-
-    // Pacote local (não há outro destino claro) — por enquanto apenas loga
-    ESP_LOGI(TAG, "📍 Pacote para processamento local: %s %s", packet.method.c_str(), packet.endpoint.c_str());
-}
-
-void Router::send_to(const Protocol::Packet &packet, const std::string &target)
-{
-    Protocol::Packet p = packet;
-    p.route.dst = target;
-    handle_packet(p);
-}
+} // namespace WetzelMesh

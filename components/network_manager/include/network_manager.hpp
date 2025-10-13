@@ -17,7 +17,7 @@ namespace WetzelMesh
         static void init(bool isGateway);
 
         // Envio alto nível (decide BLE ou UART)
-        static void send(const Protocol::Packet &packet);
+        static bool send(const Protocol::Packet &packet);
 
         // Entrada da pilha quando chega algo (BLE/UART)
         static void handle_incoming(const Protocol::Packet &packet);
