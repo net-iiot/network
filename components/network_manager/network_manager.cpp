@@ -104,19 +104,19 @@ void NetworkManager::handle_incoming(const Protocol::Packet &packet)
             return;
         }
 
-        // Se quiser propagar outros eventos de broadcast, pode descomentar:
+        // (Se quiser propagar outros eventos de broadcast, descomente)
         // NetworkManager::send(packet);
         return;
     }
-
-    // Exemplo: roteamento futuro p/ destino específico poderia ir aqui
-    // (por enquanto, nada específico)
 }
 
 void NetworkManager::start_hello_task()
 {
     auto hello_task = [](void *)
     {
+        // Aguarda ESPNOW estabilizar (peer e canal) antes do 1º HELLO
+        vTaskDelay(pdMS_TO_TICKS(400));
+
         for (;;)
         {
             Protocol::Packet hello{};
