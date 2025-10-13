@@ -14,13 +14,12 @@
 #include <string.h>
 #include <cstring>
 
-
 using namespace WetzelMesh;
 
 static const char *TAG = "BLE";
 
 // -----------------------------------------------------------------------------
-// UUIDs do serviço/characteristics WetzelMesh
+// UUIDs do serviço/characteristics WetzelMesh (placeholder)
 // -----------------------------------------------------------------------------
 static const uint8_t SERVICE_UUID[16] = {0x57, 0x4D, 0x00, 0x01, 0xAA, 0xBB, 0xCC, 0xDD, 0x88, 0x99, 0x10, 0x20, 0x30, 0x40, 0x50, 0x60}; // "WM"
 static const uint8_t RX_CHAR_UUID[16] = {0x57, 0x4D, 0x00, 0x02, 0xAA, 0xBB, 0xCC, 0xDD, 0x88, 0x99, 0x10, 0x20, 0x30, 0x40, 0x50, 0x60};
@@ -39,14 +38,12 @@ bool BLETransport::s_isGateway = false;
 // -----------------------------------------------------------------------------
 static esp_ble_adv_params_t s_adv_params = {};
 static bool s_adv_data_set = false;
-static bool s_scan_rsp_set = true;
+static bool s_scan_rsp_set = false; // <- não usamos scan_rsp por padrão
 static bool s_advertising = false;
 
 // -----------------------------------------------------------------------------
-// Manufacturer data opcional
+// Advertising data (enxuto): nome + UUID de serviço
 // -----------------------------------------------------------------------------
-static uint8_t kMfgData[] = {0x57, 0x4D, 0x01}; // "WM"+versão
-
 static esp_ble_adv_data_t s_adv_data = {
     .set_scan_rsp = false,
     .include_name = true,
@@ -56,7 +53,7 @@ static esp_ble_adv_data_t s_adv_data = {
     .appearance = 0x00,
     .manufacturer_len = 0,
     .p_manufacturer_data = nullptr,
-    .service_data_len = 0, // correção de ordem
+    .service_data_len = 0,
     .p_service_data = nullptr,
     .service_uuid_len = sizeof(SERVICE_UUID),
     .p_service_uuid = (uint8_t *)SERVICE_UUID,
@@ -88,7 +85,7 @@ std::string BLETransport::node_id()
 // -----------------------------------------------------------------------------
 static void maybe_start_advertising()
 {
-    if (!s_advertising && s_adv_data_set && s_scan_rsp_set)
+    if (!s_advertising && s_adv_data_set)
     {
         esp_err_t err = esp_ble_gap_start_advertising(&s_adv_params);
         if (err == ESP_OK)
@@ -116,12 +113,6 @@ static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param
         maybe_start_advertising();
         break;
 
-    case ESP_GAP_BLE_SCAN_RSP_DATA_SET_COMPLETE_EVT:
-        s_scan_rsp_set = true;
-        ESP_LOGD(TAG, "Scan response configurado");
-        maybe_start_advertising();
-        break;
-
     case ESP_GAP_BLE_ADV_START_COMPLETE_EVT:
         if (param->adv_start_cmpl.status != ESP_BT_STATUS_SUCCESS)
         {
@@ -132,7 +123,7 @@ static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param
 
     case ESP_GAP_BLE_ADV_STOP_COMPLETE_EVT:
         s_advertising = false;
-        ESP_LOGI(TAG, "Advertising parado");''
+        ESP_LOGI(TAG, "Advertising parado");
         break;
 
     default:
@@ -141,7 +132,7 @@ static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param
 }
 
 // -----------------------------------------------------------------------------
-// GATTS handler
+// GATTS handler (mínimo; sem tabela de atributos por enquanto)
 // -----------------------------------------------------------------------------
 static void gatts_event_handler(esp_gatts_cb_event_t event,
                                 esp_gatt_if_t gatts_if,
@@ -244,6 +235,7 @@ void BLETransport::start_gap_gatt()
 
 void BLETransport::setup_service()
 {
+    // Mantemos um service mínimo (sem attr table por enquanto)
     esp_gatt_srvc_id_t service_id = {};
     service_id.is_primary = true;
     service_id.id.inst_id = 0;
@@ -262,7 +254,12 @@ void BLETransport::start_advertising()
     s_adv_params.adv_filter_policy = ADV_FILTER_ALLOW_SCAN_ANY_CON_ANY;
 
     s_adv_data_set = false;
-    s_scan_rsp_set = true;
+    s_scan_rsp_set = false; // não vamos usar scan response
+
+    // ADV enxuto (nome + UUID de serviço)
+    s_adv_data.include_name = true;
+    s_adv_data.manufacturer_len = 0;
+    s_adv_data.p_manufacturer_data = nullptr;
 
     ESP_ERROR_CHECK(esp_ble_gap_config_adv_data(&s_adv_data));
 }

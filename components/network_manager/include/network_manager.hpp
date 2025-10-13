@@ -1,30 +1,36 @@
 #pragma once
 #include <string>
 #include <vector>
+#include <stdint.h>
 #include "protocol.hpp"
 
 namespace WetzelMesh
 {
+
     struct Neighbor
     {
-        std::string id; // node-id
-        int rssi = 0;
+        std::string id;        // ex: "node-ABCD"
+        int rssi;              // RSSI (placeholder, preenche -40 se não tiver)
+        uint64_t last_seen_ms; // timestamp do último HELLO
     };
 
     class NetworkManager
     {
     public:
         static void init(bool isGateway);
-
-        // Envio alto nível (decide BLE ou UART)
-        static bool send(const Protocol::Packet &packet);
-
-        // Entrada da pilha quando chega algo (BLE/UART)
-        static void handle_incoming(const Protocol::Packet &packet);
-
+        static bool is_gateway();
         static const std::vector<Neighbor> &neighbors();
 
-        static bool is_gateway();
+        // Envia um pacote pela malha (ESPNOW)
+        static bool send(const Protocol::Packet &p);
+
+        // Entrada comum de pacotes vindos de transportes
+        static void handle_incoming(const Protocol::Packet &packet);
+
+        // ===== NOVOS =====
+        static void start_hello_task();                             // task periódica que envia HELLO
+        static void on_hello(const std::string &node_id, int rssi); // atualiza a tabela de vizinhos
+        static uint64_t now_ms();                                   // time utilitário
 
     private:
         static void refresh_neighbors_task(void *param);
@@ -32,4 +38,5 @@ namespace WetzelMesh
         static bool s_gateway;
         static std::vector<Neighbor> s_neighbors;
     };
+
 } // namespace WetzelMesh

@@ -7,7 +7,7 @@
 #include "router.hpp"
 #include "network_manager.hpp"
 #include "test_packet_generator.hpp"
-#include "gateway.hpp" // FIX: faltava esse include
+#include "gateway.hpp" // ainda útil para o modo gateway, mas init é feito no NetworkManager
 
 using namespace WetzelMesh;
 
@@ -37,15 +37,10 @@ extern "C" void app_main(void)
     LedManager::init(kIsGateway);
     ESP_LOGI(TAG, "LED Manager inicializado");
 
-    Router::init(kIsGateway); // FIX: agora passa o parâmetro corretamente
-    NetworkManager::init(kIsGateway);
+    Router::init(kIsGateway);
+    NetworkManager::init(kIsGateway); // aqui dentro o Gateway::init() é chamado se for gateway
 
-    if (kIsGateway)
-    {
-        Gateway::init(); // FIX: corrigido include e escopo
-    }
-
-    // Geração de pacotes de teste
+    // Geração de pacotes de teste (opcional)
     start_test_generation();
 
     ESP_LOGI(TAG, "WetzelMesh pronto no modo: %s", kIsGateway ? "Gateway" : "Node");

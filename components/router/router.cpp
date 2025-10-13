@@ -13,28 +13,33 @@ namespace WetzelMesh
 
     void Router::init(bool isGateway)
     {
-        (void)isGateway;         // por ora não usamos
-        ESPNOWTransport::init(); // inicia o transporte
+        (void)isGateway;
+        // ESPNOW agora é inicializado no NetworkManager::init()
     }
 
     void Router::handle_packet(const Protocol::Packet &pkt)
     {
-        // log sem tamanho (evita usar campo que não existe)
         ESP_LOGI(TAG, "Roteando pacote: %s -> %s",
                  pkt.route.src.c_str(), pkt.route.dst.c_str());
 
-        // pisca RX (esta existe no seu projeto)
         LedManager::on_packet_received();
 
-        if (pkt.route.dst == "gateway")
+        // 1) Descoberta automática: EVENT/HELLO atualiza vizinhos e não reencaminha
+        if (pkt.type == Protocol::PacketType::EVENT && pkt.method == std::string("HELLO"))
         {
-            Gateway::send(pkt);
-            // LedManager::on_packet_sent(); // <- remover/ comentar: função não existe
+            NetworkManager::on_hello(pkt.route.src, /*rssi=*/-40); // preenche -40 por enquanto
             return;
         }
 
-        NetworkManager::send(pkt);
-        // LedManager::on_packet_sent();     // <- remover/ comentar
+        // 2) Destino "gateway" → envia pela ponte (UART/HTTP)
+        if (pkt.route.dst == "gateway")
+        {
+            Gateway::send(pkt);
+            return;
+        }
+
+        // 3) Default: se quiser manter broadcast, use NetworkManager::send(pkt) aqui.
+        //    (Por padrão, não refaz broadcast para evitar looping.)
     }
 
 } // namespace WetzelMesh
