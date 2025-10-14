@@ -17,10 +17,7 @@ static const char *TAG = "NETMAN";
 bool NetworkManager::s_gateway = false;
 std::vector<Neighbor> NetworkManager::s_neighbors;
 
-uint64_t NetworkManager::now_ms()
-{
-    return esp_timer_get_time() / 1000ULL;
-}
+uint64_t NetworkManager::now_ms() { return esp_timer_get_time() / 1000ULL; }
 
 void NetworkManager::init(bool isGateway)
 {
@@ -28,26 +25,24 @@ void NetworkManager::init(bool isGateway)
 
     if (s_gateway)
     {
-        // GATEWAY: ponte com servidor + UART com nó-borda (sem mesh/ble)
-        Gateway::init();
-        ESP_LOGI(TAG, "Network Manager: modo Gateway (mesh/BLE desativados)");
+        Gateway::init(); // somente UART+server
+        ESP_LOGI(TAG, "INIT: GATEWAY (mesh/BLE OFF)");
     }
     else
     {
-        // NODE: ESPNOW + BLE + Border UART (se este for o nó-borda)
         ESPNOWTransport::init();
         BLETransport::init(false);
 
-        // Inicializa a UART da borda (se não houver cabos, apenas não trafega).
         BorderUart::init();
-
-        // Registra handler: tudo que vier da UART do gateway entra no roteador
         BorderUart::set_rx_handler([](const Protocol::Packet &pkt)
-                                   { Router::handle_packet(pkt); });
+                                   {
+            // Tudo que descer do gateway pela UART entra no roteador
+            ESP_LOGI(TAG, "FLOW: UART(BORDER<-GW) -> Router");
+            Router::handle_packet(pkt); });
 
         xTaskCreatePinnedToCore(&NetworkManager::refresh_neighbors_task, "neighbors", 4096, nullptr, 4, nullptr, 0);
         start_hello_task();
-        ESP_LOGI(TAG, "Network Manager: modo Node (mesh ESPNOW + BLE + (opcional) Border UART)");
+        ESP_LOGI(TAG, "INIT: NODE (mesh+BLE [+UART se borda])");
     }
 }
 
@@ -76,64 +71,68 @@ void NetworkManager::refresh_neighbors_task(void *param)
     }
 }
 
-bool NetworkManager::is_gateway()
-{
-    return s_gateway;
-}
-
-const std::vector<Neighbor> &NetworkManager::neighbors()
-{
-    return s_neighbors;
-}
+bool NetworkManager::is_gateway() { return s_gateway; }
+const std::vector<Neighbor> &NetworkManager::neighbors() { return s_neighbors; }
 
 bool NetworkManager::send(const Protocol::Packet &p)
 {
     if (s_gateway)
     {
-        // Gateway: sempre envia ao nó-borda via UART (ele injeta na mesh)
+        ESP_LOGI(TAG, "ROUTE DECISION: GATEWAY TX via UART -> BORDER (dst=%s)", p.route.dst.c_str());
         return Gateway::send_to_border(p);
     }
     else
     {
-        // Nó:
-        // Se o destino é o gateway e este nó é a borda (UART ativa), sobe por UART.
         if (p.route.dst == "gateway" && BorderUart::is_enabled())
+        {
+            ESP_LOGI(TAG, "ROUTE DECISION: NODE (BORDER) TX via UART -> GW (dst=%s)", p.route.dst.c_str());
             return BorderUart::send_to_gateway(p);
-
-        // Caso contrário, envia pela mesh ESPNOW
+        }
+        ESP_LOGI(TAG, "ROUTE DECISION: NODE TX via MESH (dst=%s)", p.route.dst.c_str());
         return ESPNOWTransport::send(p);
     }
 }
 
 void NetworkManager::handle_incoming(const Protocol::Packet &packet)
 {
-    ESP_LOGI("NETMAN", "RX %s -> %s", packet.route.src.c_str(), packet.route.dst.c_str());
+    ESP_LOGI(TAG, "HANDLE_INCOMING: %s -> %s", packet.route.src.c_str(), packet.route.dst.c_str());
     LedManager::on_packet_received();
 
     if (s_gateway)
     {
         if (packet.route.dst == "server")
+        {
+            ESP_LOGI(TAG, "FORWARD: GW -> SERVER");
             Gateway::send(packet);
+        }
         else
+        {
+            ESP_LOGI(TAG, "FORWARD: GW -> BORDER via UART");
             Gateway::send_to_border(packet);
+        }
         return;
     }
 
-    // Em nó:
+    // Node
     if (packet.type == Protocol::PacketType::EVENT && packet.method == "HELLO")
-        return; // não floodar HELLO
+        return;
 
     if (packet.route.dst == "gateway")
     {
-        // encaminhamento “para cima” — mesma regra do send()
         if (BorderUart::is_enabled())
+        {
+            ESP_LOGI(TAG, "FORWARD: NODE(BORDER) -> GW via UART");
             BorderUart::send_to_gateway(packet);
+        }
         else
+        {
+            ESP_LOGI(TAG, "FORWARD: NODE -> GW via MESH");
             ESPNOWTransport::send(packet);
+        }
         return;
     }
 
-    // Broadcast/controlado — comente/descomente conforme a necessidade
+    // Broadcast/controlado — habilite se quiser propagar
     // if (packet.route.dst == "broadcast") ESPNOWTransport::send(packet);
 }
 
@@ -141,7 +140,7 @@ void NetworkManager::start_hello_task()
 {
     auto hello_task = [](void *)
     {
-        vTaskDelay(pdMS_TO_TICKS(400)); // aguarda mesh estabilizar
+        vTaskDelay(pdMS_TO_TICKS(400));
         for (;;)
         {
             Protocol::Packet hello{};
@@ -151,6 +150,7 @@ void NetworkManager::start_hello_task()
             hello.route.dst = "broadcast";
             hello.body = R"({"t":"hello"})";
 
+            ESP_LOGI(TAG, "TX[HELLO] %s -> broadcast", hello.route.src.c_str());
             ESPNOWTransport::send(hello);
             vTaskDelay(pdMS_TO_TICKS(2000));
         }

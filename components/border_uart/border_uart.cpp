@@ -57,31 +57,26 @@ namespace WetzelMesh
         xTaskCreatePinnedToCore(uart_listen_task, "border_uart_rx", 4096, nullptr, 5, nullptr, tskNO_AFFINITY);
 
         s_enabled = true;
-        ESP_LOGI(TAG, "Border UART ativa (TX=%d RX=%d, %dbps)", kTxPin, kRxPin, kBaud);
+        ESP_LOGI(TAG, "BORDER UART ativa (TX=%d RX=%d, %dbps)", kTxPin, kRxPin, kBaud);
         return true;
     }
 
-    bool BorderUart::is_enabled()
-    {
-        return s_enabled;
-    }
+    bool BorderUart::is_enabled() { return s_enabled; }
 
-    void BorderUart::set_rx_handler(RxHandler cb)
-    {
-        s_rx_handler = cb;
-    }
+    void BorderUart::set_rx_handler(RxHandler cb) { s_rx_handler = cb; }
 
     bool BorderUart::send_to_gateway(const Protocol::Packet &pkt)
     {
         if (!s_enabled)
             return false;
         std::string json = Protocol::serialize(pkt);
+        ESP_LOGI(TAG, "TX[UART BORDER->GW] %s -> %s (%u bytes)",
+                 pkt.route.src.c_str(), pkt.route.dst.c_str(), (unsigned)json.size());
         return uart_write_json(json);
     }
 
     bool BorderUart::uart_write_json(const std::string &json)
     {
-        // Framing: <len>\n<json>
         char header[16];
         int n = snprintf(header, sizeof(header), "%u\n", (unsigned)json.size());
         if (n <= 0)
@@ -91,7 +86,7 @@ namespace WetzelMesh
         int w2 = uart_write_bytes(kUartNum, json.c_str(), json.size());
         if (w1 < 0 || w2 < 0)
         {
-            ESP_LOGE(TAG, "uart_write_bytes falhou");
+            ESP_LOGE(TAG, "TX[UART BORDER->GW] erro driver");
             return false;
         }
         return true;
@@ -114,7 +109,7 @@ namespace WetzelMesh
                     if (ch == '\n')
                         break;
                     if (acc.size() < 12)
-                        acc.push_back((char)ch); // protege de headers absurdos
+                        acc.push_back((char)ch);
                 }
                 else
                 {
@@ -128,7 +123,6 @@ namespace WetzelMesh
 
         for (;;)
         {
-            // header <len>\n
             std::string lenStr = read_line();
             if (lenStr.empty())
                 continue;
@@ -136,11 +130,10 @@ namespace WetzelMesh
             int len = atoi(lenStr.c_str());
             if (len <= 0 || len > (int)jsonBuf.size())
             {
-                ESP_LOGW(TAG, "len inválido na UART: %d", len);
+                ESP_LOGW(TAG, "RX[UART BORDER<-GW] len invalido: %d", len);
                 continue;
             }
 
-            // corpo JSON
             int got = 0;
             while (got < len)
             {
@@ -155,19 +148,15 @@ namespace WetzelMesh
             Protocol::Packet pkt;
             if (Protocol::parse(json, pkt))
             {
+                ESP_LOGI(TAG, "RX[UART BORDER<-GW] from=%s dst=%s (%d bytes)",
+                         pkt.route.src.c_str(), pkt.route.dst.c_str(), len);
                 LedManager::on_packet_received();
                 if (s_rx_handler)
-                {
-                    s_rx_handler(pkt); // entrega ao handler registrado (NetworkManager)
-                }
-                else
-                {
-                    ESP_LOGW(TAG, "RX handler não registrado; descartando");
-                }
+                    s_rx_handler(pkt);
             }
             else
             {
-                ESP_LOGW(TAG, "JSON inválido na UART (border)");
+                ESP_LOGW(TAG, "RX[UART BORDER<-GW] JSON invalido");
             }
         }
     }

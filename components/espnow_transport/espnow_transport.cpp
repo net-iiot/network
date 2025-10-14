@@ -7,7 +7,6 @@
 #include "esp_log.h"
 #include "router.hpp"
 #include "led_manager.hpp"
-#include "protocol.hpp"
 #include "network_manager.hpp"
 
 namespace WetzelMesh
@@ -15,15 +14,13 @@ namespace WetzelMesh
 
     static const char *TAG = "ESPNOW";
 
-    // Canal fixo para operação sem associação (ajuste se necessário)
-    static constexpr uint8_t kESPNOW_CHANNEL = 1;
+    // endereço broadcast (6 bytes)
     static const uint8_t kBroadcast[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
-    inline const uint8_t *ESPNOWTransport::broadcast_addr() { return kBroadcast; }
-
-    // ----------------------------------------------------------------------------
-    // Helpers privados
-    // ----------------------------------------------------------------------------
+    const uint8_t *ESPNOWTransport::broadcast_addr()
+    {
+        return kBroadcast;
+    }
 
     static void espnow_recv_thunk(const esp_now_recv_info_t *info,
                                   const uint8_t *data, int len)
@@ -44,38 +41,35 @@ namespace WetzelMesh
 
     bool ESPNOWTransport::ensure_wifi_started()
     {
-        // netif + loop + STA default (idempotentes)
-        esp_netif_init();
-        esp_event_loop_create_default();
-        esp_netif_create_default_wifi_sta();
+        ESP_ERROR_CHECK(esp_netif_init());
+        (void)esp_event_loop_create_default(); // ignora erro se já criado
+        (void)esp_netif_create_default_wifi_sta();
 
         wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
         esp_err_t err = esp_wifi_init(&cfg);
         if (err != ESP_OK && err != ESP_ERR_WIFI_INIT_STATE)
         {
-            ESP_LOGE(TAG, "esp_wifi_init falhou: %s", esp_err_to_name(err));
+            ESP_LOGE(TAG, "esp_wifi_init: %s", esp_err_to_name(err));
             return false;
         }
-
         ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
         ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+
         err = esp_wifi_start();
         if (err != ESP_OK && err != ESP_ERR_WIFI_NOT_INIT && err != ESP_ERR_WIFI_CONN)
         {
-            ESP_LOGW(TAG, "esp_wifi_start retornou: %s", esp_err_to_name(err));
+            ESP_LOGW(TAG, "esp_wifi_start: %s", esp_err_to_name(err));
         }
-
         return true;
     }
 
     bool ESPNOWTransport::ensure_channel_fixed()
     {
-        // Quando STA não está associado, fixe explicitamente um canal
-        // para que ESPNOW saiba onde transmitir/receber.
+        // Quando não associado, fixe um canal estático compatível com a malha
         esp_err_t err = esp_wifi_set_channel(kESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE);
         if (err != ESP_OK)
         {
-            ESP_LOGE(TAG, "Falha ao setar canal=%d: %s", kESPNOW_CHANNEL, esp_err_to_name(err));
+            ESP_LOGE(TAG, "set_channel=%d: %s", kESPNOW_CHANNEL, esp_err_to_name(err));
             return false;
         }
         return true;
@@ -87,83 +81,74 @@ namespace WetzelMesh
         if (esp_now_is_peer_exist(kBroadcast))
             return true;
 #endif
-
         esp_now_peer_info_t peer = {};
-        memset(&peer, 0, sizeof(peer));
         memcpy(peer.peer_addr, kBroadcast, 6);
         peer.ifidx = WIFI_IF_STA;
-        peer.channel = kESPNOW_CHANNEL; // **mesmo canal fixo**
+        peer.channel = kESPNOW_CHANNEL; // quando STA estiver associado, o rádio fica no canal do AP
         peer.encrypt = false;
 
         esp_err_t err = esp_now_add_peer(&peer);
         if (err == ESP_OK || err == ESP_ERR_ESPNOW_EXIST)
         {
-            ESP_LOGI(TAG, "Peer broadcast ativo no canal %d", kESPNOW_CHANNEL);
+            ESP_LOGI(TAG, "Peer broadcast ativo (canal base %d)", kESPNOW_CHANNEL);
             return true;
         }
-
-        ESP_LOGE(TAG, "Falha ao adicionar peer broadcast: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "add_peer(broadcast): %s", esp_err_to_name(err));
         return false;
     }
-
-    // ----------------------------------------------------------------------------
-    // API pública
-    // ----------------------------------------------------------------------------
 
     void ESPNOWTransport::init()
     {
         ESP_LOGI(TAG, "Inicializando ESPNOW...");
-
         if (!ensure_wifi_started())
         {
-            ESP_LOGE(TAG, "Wi-Fi STA não iniciou; abortando ESPNOW");
+            ESP_LOGE(TAG, "Wi-Fi STA nao iniciou; abortando ESPNOW");
             return;
         }
 
-        // Fixar canal antes de iniciar ESPNOW
+        // Se não associado a AP, travamos no canal fixo
         ensure_channel_fixed();
 
-        // (Re)inicializa ESPNOW com segurança
-        esp_now_deinit(); // ok chamar mesmo se não estiver iniciado
+        // Reinit seguro
+        (void)esp_now_deinit();
         esp_err_t err = esp_now_init();
         if (err != ESP_OK)
         {
-            ESP_LOGE(TAG, "esp_now_init falhou: %s", esp_err_to_name(err));
+            ESP_LOGE(TAG, "esp_now_init: %s", esp_err_to_name(err));
             return;
         }
 
         ESP_ERROR_CHECK(esp_now_register_recv_cb(espnow_recv_thunk));
-
-        // Garante peer broadcast no canal fixo
         ensure_broadcast_peer();
 
-        ESP_LOGI(TAG, "ESPNOW iniciado no canal %d", kESPNOW_CHANNEL);
+        ESP_LOGI(TAG, "ESPNOW iniciado (canal base %d)", kESPNOW_CHANNEL);
     }
 
     bool ESPNOWTransport::send(const Protocol::Packet &p)
     {
-        // Garante que estamos com canal fixo e peer broadcast registrado
+        // log de intenção de envio pela malha
+        const std::string payload = Protocol::serialize(p);
+        ESP_LOGI(TAG, "TX[MESH] %s -> %s (%u bytes)",
+                 p.route.src.c_str(), p.route.dst.c_str(), (unsigned)payload.size());
+
+        // Garante canal (quando não associado) e peer
         ensure_channel_fixed();
         if (!ensure_broadcast_peer())
         {
             vTaskDelay(pdMS_TO_TICKS(30));
             if (!ensure_broadcast_peer())
             {
-                ESP_LOGE(TAG, "Sem peer broadcast; cancelando envio");
+                ESP_LOGE(TAG, "Sem peer broadcast; cancelando TX[MESH]");
                 return false;
             }
         }
 
-        std::string payload = Protocol::serialize(p);
-
-        // Use o endereço broadcast explicitamente (não nullptr)
         esp_err_t err = esp_now_send(broadcast_addr(),
                                      reinterpret_cast<const uint8_t *>(payload.data()),
                                      payload.size());
-
         if (err == ESP_ERR_ESPNOW_NOT_FOUND)
         {
-            ESP_LOGW(TAG, "Peer não encontrado; recriando e tentando novamente...");
+            ESP_LOGW(TAG, "TX[MESH] peer nao encontrado; recriando...");
             ensure_channel_fixed();
             ensure_broadcast_peer();
             vTaskDelay(pdMS_TO_TICKS(20));
@@ -171,10 +156,9 @@ namespace WetzelMesh
                                reinterpret_cast<const uint8_t *>(payload.data()),
                                payload.size());
         }
-
         if (err != ESP_OK)
         {
-            ESP_LOGE(TAG, "Falha no envio ESPNOW: %s", esp_err_to_name(err));
+            ESP_LOGE(TAG, "TX[MESH] erro: %s", esp_err_to_name(err));
             return false;
         }
 
@@ -188,24 +172,21 @@ namespace WetzelMesh
             return;
 
         std::string s(reinterpret_cast<const char *>(data), len);
-
         Protocol::Packet pkt;
         if (Protocol::parse(s, pkt))
         {
-            // Atualiza vizinho quando for HELLO
-            if (pkt.type == Protocol::PacketType::EVENT && pkt.method == "HELLO")
-            {
-                NetworkManager::on_hello(pkt.route.src, rssi);
-            }
+            ESP_LOGI(TAG, "RX[MESH] from=%s dst=%s rssi=%d (%d bytes)",
+                     pkt.route.src.c_str(), pkt.route.dst.c_str(), rssi, len);
 
-            ESP_LOGI(TAG, "📡 RX ESPNOW [%s] RSSI=%d", pkt.route.src.c_str(), rssi);
+            if (pkt.type == Protocol::PacketType::EVENT && pkt.method == "HELLO")
+                NetworkManager::on_hello(pkt.route.src, rssi);
 
             Router::handle_packet(pkt);
             LedManager::on_packet_received();
         }
         else
         {
-            ESP_LOGW(TAG, "Pacote ESPNOW inválido recebido (%d bytes)", len);
+            ESP_LOGW(TAG, "RX[MESH] pacote invalido (%d bytes)", len);
         }
     }
 

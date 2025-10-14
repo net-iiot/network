@@ -3,7 +3,7 @@
 #include "driver/uart.h"
 #include "protocol.hpp"
 #include "network_manager.hpp"
-#include "esp_bt.h" // ✅ para esp_bt_controller_mem_release
+#include "esp_bt.h"
 
 namespace WetzelMesh
 {
@@ -15,29 +15,20 @@ namespace WetzelMesh
     static constexpr int kTxPin = 17;
     static constexpr int kRxPin = 16;
     static constexpr int kBaud = 115200;
-
     static constexpr size_t kBufSize = 2048;
 
     void Gateway::init()
     {
-        // ✅ Desabilita completamente Bluetooth (Classic + BLE) e libera RAM associada.
-        //    Seguro chamar antes de qualquer inicialização do controlador BT.
+        // Desativa BLE/BT e libera RAM
         esp_err_t r = esp_bt_controller_mem_release(ESP_BT_MODE_BTDM);
         if (r == ESP_OK)
-        {
-            ESP_LOGI(TAG, "Memória do Bluetooth (BTDM) liberada.");
-        }
+            ESP_LOGI(TAG, "Memoria BT liberada.");
         else if (r == ESP_ERR_INVALID_STATE)
-        {
-            // Já estava liberada ou o controlador já foi inicializado — não é crítico.
-            ESP_LOGW(TAG, "Memória BT já liberada ou controlador BT ativo (estado inválido).");
-        }
+            ESP_LOGW(TAG, "BT ja liberado ou ativo.");
         else
-        {
-            ESP_LOGW(TAG, "Falha ao liberar memória BTDM: %s", esp_err_to_name(r));
-        }
+            ESP_LOGW(TAG, "Falha liberar BT: %s", esp_err_to_name(r));
 
-        // UART para falar com o node borda
+        // UART GW<->Borda
         uart_config_t cfg{};
         cfg.baud_rate = kBaud;
         cfg.data_bits = UART_DATA_8_BITS;
@@ -49,30 +40,30 @@ namespace WetzelMesh
         ESP_ERROR_CHECK(uart_set_pin(kUartNum, kTxPin, kRxPin, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
         ESP_ERROR_CHECK(uart_driver_install(kUartNum, kBufSize, kBufSize, 0, nullptr, 0));
 
-        // Task para ficar lendo da UART (borda -> gateway -> servidor)
         xTaskCreatePinnedToCore(uart_listen_task, "gw_uart_rx", 4096, nullptr, 5, nullptr, tskNO_AFFINITY);
 
-        ESP_LOGI(TAG, "Gateway inicializado (UART ativa, BLE/BT desativados).");
+        ESP_LOGI(TAG, "Gateway inicializado (UART ativa, BLE/BT off).");
     }
 
     bool Gateway::send(const Protocol::Packet &pkt)
     {
-        // Integração com backend (HTTP/MQTT/etc.) — placeholder
         std::string json = Protocol::serialize(pkt);
-        ESP_LOGI(TAG, "Enviando ao SERVIDOR: %s", json.c_str());
-        // TODO: Implementar envio real ao servidor
+        ESP_LOGI(TAG, "TX[SERVER] from=%s dst=%s (%u bytes)",
+                 pkt.route.src.c_str(), pkt.route.dst.c_str(), (unsigned)json.size());
+        // TODO: envio real ao servidor
         return true;
     }
 
     bool Gateway::send_to_border(const Protocol::Packet &pkt)
     {
         std::string json = Protocol::serialize(pkt);
+        ESP_LOGI(TAG, "TX[UART GW->BORDER] %s -> %s (%u bytes)",
+                 pkt.route.src.c_str(), pkt.route.dst.c_str(), (unsigned)json.size());
         return uart_write_json(json);
     }
 
     bool Gateway::uart_write_json(const std::string &json)
     {
-        // Protocolo simples: <len>\n<json>
         char header[16];
         int n = snprintf(header, sizeof(header), "%u\n", (unsigned)json.size());
         if (n <= 0)
@@ -82,7 +73,7 @@ namespace WetzelMesh
         int w2 = uart_write_bytes(kUartNum, json.c_str(), json.size());
         if (w1 < 0 || w2 < 0)
         {
-            ESP_LOGE(TAG, "uart_write_bytes falhou");
+            ESP_LOGE(TAG, "TX[UART GW->BORDER] erro driver");
             return false;
         }
         return true;
@@ -106,12 +97,10 @@ namespace WetzelMesh
                         break;
                     acc.push_back((char)ch);
                     if (acc.size() > 12)
-                        acc.erase(acc.begin()); // evita linha de header absurda
+                        acc.erase(acc.begin());
                 }
                 else
-                {
                     vTaskDelay(pdMS_TO_TICKS(5));
-                }
             }
             return acc;
         };
@@ -120,7 +109,6 @@ namespace WetzelMesh
 
         for (;;)
         {
-            // lê header <len>\n
             std::string lenStr = read_line();
             if (lenStr.empty())
                 continue;
@@ -128,7 +116,7 @@ namespace WetzelMesh
             int len = atoi(lenStr.c_str());
             if (len <= 0 || len > (int)jsonBuf.size())
             {
-                ESP_LOGW(TAG, "len inválido na UART: %d", len);
+                ESP_LOGW(TAG, "RX[UART GW<-BORDER] len invalido: %d", len);
                 continue;
             }
 
@@ -146,15 +134,18 @@ namespace WetzelMesh
             Protocol::Packet pkt;
             if (Protocol::parse(json, pkt))
             {
-                // Pacote vindo da borda: se o destino for "server", sobe pro servidor
+                ESP_LOGI(TAG, "RX[UART GW<-BORDER] from=%s dst=%s (%d bytes)",
+                         pkt.route.src.c_str(), pkt.route.dst.c_str(), len);
+
+                // Se destino for servidor, sobe
                 if (pkt.route.dst == "server")
                     send(pkt);
                 else
-                    ESP_LOGI(TAG, "UART->GATEWAY RX destino %s (roteie conforme regra)", pkt.route.dst.c_str());
+                    ESP_LOGI(TAG, "GW roteamento local pendente p/ dst=%s", pkt.route.dst.c_str());
             }
             else
             {
-                ESP_LOGW(TAG, "JSON inválido vindo da UART");
+                ESP_LOGW(TAG, "RX[UART GW<-BORDER] JSON invalido");
             }
         }
     }

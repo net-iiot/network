@@ -5,7 +5,7 @@
 
 namespace WetzelMesh
 {
-    static gpio_num_t kLedTraffic = GPIO_NUM_27; // gateway
+    static gpio_num_t kLedTraffic = GPIO_NUM_25; // gateway
     static gpio_num_t kLedNodeA = GPIO_NUM_26;   // node
     static gpio_num_t kLedNodeB = GPIO_NUM_25;   // node (reservado)
 
