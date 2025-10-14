@@ -1,178 +1,162 @@
 #include "gateway.hpp"
-#include "protocol.hpp" // <--- aqui sim!
-#include "led_manager.hpp"
-#include "router.hpp"
-
 #include "esp_log.h"
 #include "driver/uart.h"
-#include "driver/gpio.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-
-#include "nvs_flash.h"
-#include "esp_event.h"
-#include "esp_netif.h"
-#include "esp_wifi.h"
-#include "esp_http_client.h" // <--- precisa do REQUIRES correto no CMake
+#include "protocol.hpp"
+#include "network_manager.hpp"
+#include "esp_bt.h" // ✅ para esp_bt_controller_mem_release
 
 namespace WetzelMesh
 {
 
     static const char *TAG = "GATEWAY";
 
-    // --- Wi-Fi STA ---
-    void Gateway::init_wifi(const char *ssid, const char *pass)
-    {
-        ESP_ERROR_CHECK(esp_netif_init());
-        ESP_ERROR_CHECK(esp_event_loop_create_default());
-        esp_netif_create_default_wifi_sta();
+    // Ajuste conforme seu hardware
+    static constexpr uart_port_t kUartNum = UART_NUM_1;
+    static constexpr int kTxPin = 17;
+    static constexpr int kRxPin = 16;
+    static constexpr int kBaud = 115200;
 
-        wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-        ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+    static constexpr size_t kBufSize = 2048;
 
-        wifi_config_t sta_cfg = {};
-        // cuidado com o tamanho/terminador:
-        strncpy((char *)sta_cfg.sta.ssid, ssid, sizeof(sta_cfg.sta.ssid));
-        strncpy((char *)sta_cfg.sta.password, pass, sizeof(sta_cfg.sta.password));
-        sta_cfg.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
-
-        ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-        ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &sta_cfg));
-        ESP_ERROR_CHECK(esp_wifi_start());
-        ESP_ERROR_CHECK(esp_wifi_connect());
-
-        ESP_LOGI(TAG, "Wi-Fi STA conectando em SSID=%s ...", ssid);
-    }
-
-    // --- HTTP ---
-    static esp_err_t _http_event(esp_http_client_event_t *) { return ESP_OK; }
-
-    bool Gateway::http_post_json(const std::string &url, const std::string &body, std::string &out_resp)
-    {
-        esp_http_client_config_t cfg = {};
-        cfg.url = url.c_str();
-        cfg.method = HTTP_METHOD_POST;
-        cfg.event_handler = _http_event;
-        cfg.timeout_ms = 5000;
-
-        esp_http_client_handle_t h = esp_http_client_init(&cfg);
-        if (!h)
-            return false;
-
-        esp_http_client_set_header(h, "Content-Type", "application/json");
-        esp_http_client_set_post_field(h, body.c_str(), body.size());
-
-        esp_err_t err = esp_http_client_perform(h);
-        if (err != ESP_OK)
-        {
-            esp_http_client_cleanup(h);
-            return false;
-        }
-
-        int status = esp_http_client_get_status_code(h);
-        int len = esp_http_client_get_content_length(h);
-
-        out_resp.clear();
-        if (status == 200 && len > 0)
-        {
-            out_resp.resize(len);
-            int r = esp_http_client_read_response(h, out_resp.data(), len);
-            if (r < 0)
-                out_resp.clear();
-        }
-        esp_http_client_cleanup(h);
-        return status == 200;
-    }
-
-    // --- Inicialização principal do Gateway ---
     void Gateway::init()
     {
-        ESP_LOGI(TAG, "Inicializando Gateway (Wi-Fi + HTTP + UART)...");
-        LedManager::set_gateway_server_connected(false);
+        // ✅ Desabilita completamente Bluetooth (Classic + BLE) e libera RAM associada.
+        //    Seguro chamar antes de qualquer inicialização do controlador BT.
+        esp_err_t r = esp_bt_controller_mem_release(ESP_BT_MODE_BTDM);
+        if (r == ESP_OK)
+        {
+            ESP_LOGI(TAG, "Memória do Bluetooth (BTDM) liberada.");
+        }
+        else if (r == ESP_ERR_INVALID_STATE)
+        {
+            // Já estava liberada ou o controlador já foi inicializado — não é crítico.
+            ESP_LOGW(TAG, "Memória BT já liberada ou controlador BT ativo (estado inválido).");
+        }
+        else
+        {
+            ESP_LOGW(TAG, "Falha ao liberar memória BTDM: %s", esp_err_to_name(r));
+        }
 
-        // NVS (se não foi inicializado no main)
-        // ESP_ERROR_CHECK(nvs_flash_init());
-
-        // 1) Wi-Fi STA
-        init_wifi("SSID_EMPRESA", "SENHA_FORTE");
-
-        // 2) UART (ponte com o node-edge)
-        uart_config_t cfg = {};
-        cfg.baud_rate = BAUD;
+        // UART para falar com o node borda
+        uart_config_t cfg{};
+        cfg.baud_rate = kBaud;
         cfg.data_bits = UART_DATA_8_BITS;
         cfg.parity = UART_PARITY_DISABLE;
         cfg.stop_bits = UART_STOP_BITS_1;
         cfg.flow_ctrl = UART_HW_FLOWCTRL_DISABLE;
-        cfg.rx_flow_ctrl_thresh = 122;
-        cfg.source_clk = UART_SCLK_APB;
 
-        ESP_ERROR_CHECK(uart_driver_install(UART_PORT, BUF_SIZE, BUF_SIZE, 0, nullptr, 0));
-        ESP_ERROR_CHECK(uart_param_config(UART_PORT, &cfg));
-        ESP_ERROR_CHECK(uart_set_pin(UART_PORT, TX_PIN, RX_PIN, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
+        ESP_ERROR_CHECK(uart_param_config(kUartNum, &cfg));
+        ESP_ERROR_CHECK(uart_set_pin(kUartNum, kTxPin, kRxPin, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
+        ESP_ERROR_CHECK(uart_driver_install(kUartNum, kBufSize, kBufSize, 0, nullptr, 0));
 
-        xTaskCreate(&Gateway::listen_task, "gateway_uart_listener", 4096, nullptr, 5, nullptr);
-        ESP_LOGI(TAG, "Gateway pronto — aguardando UART para repassar ao servidor.");
+        // Task para ficar lendo da UART (borda -> gateway -> servidor)
+        xTaskCreatePinnedToCore(uart_listen_task, "gw_uart_rx", 4096, nullptr, 5, nullptr, tskNO_AFFINITY);
+
+        ESP_LOGI(TAG, "Gateway inicializado (UART ativa, BLE/BT desativados).");
     }
 
-    // --- Task: UART RX -> HTTP POST -> UART TX (resposta) ---
-    void Gateway::listen_task(void *param)
+    bool Gateway::send(const Protocol::Packet &pkt)
     {
-        uint8_t buf[BUF_SIZE];
-        std::string acc;
-        bool server_marked = false;
+        // Integração com backend (HTTP/MQTT/etc.) — placeholder
+        std::string json = Protocol::serialize(pkt);
+        ESP_LOGI(TAG, "Enviando ao SERVIDOR: %s", json.c_str());
+        // TODO: Implementar envio real ao servidor
+        return true;
+    }
 
-        while (true)
+    bool Gateway::send_to_border(const Protocol::Packet &pkt)
+    {
+        std::string json = Protocol::serialize(pkt);
+        return uart_write_json(json);
+    }
+
+    bool Gateway::uart_write_json(const std::string &json)
+    {
+        // Protocolo simples: <len>\n<json>
+        char header[16];
+        int n = snprintf(header, sizeof(header), "%u\n", (unsigned)json.size());
+        if (n <= 0)
+            return false;
+
+        int w1 = uart_write_bytes(kUartNum, header, n);
+        int w2 = uart_write_bytes(kUartNum, json.c_str(), json.size());
+        if (w1 < 0 || w2 < 0)
         {
-            int len = uart_read_bytes(UART_PORT, buf, sizeof(buf), pdMS_TO_TICKS(50));
-            if (len > 0)
+            ESP_LOGE(TAG, "uart_write_bytes falhou");
+            return false;
+        }
+        return true;
+    }
+
+    void Gateway::uart_listen_task(void *)
+    {
+        std::string acc;
+        acc.reserve(kBufSize);
+
+        auto read_line = [&]() -> std::string
+        {
+            acc.clear();
+            while (true)
             {
-                acc.append(reinterpret_cast<const char *>(buf), len);
-
-                size_t pos;
-                while ((pos = acc.find('\n')) != std::string::npos)
+                uint8_t ch;
+                int r = uart_read_bytes(kUartNum, &ch, 1, pdMS_TO_TICKS(50));
+                if (r == 1)
                 {
-                    std::string line = acc.substr(0, pos);
-                    acc.erase(0, pos + 1);
-
-                    Protocol::Packet pkt;
-                    if (!Protocol::parse(line, pkt))
-                    {
-                        ESP_LOGW(TAG, "UART linha inválida: %s", line.c_str());
-                        continue;
-                    }
-
-                    if (!server_marked)
-                    {
-                        LedManager::set_gateway_server_connected(true); // LED: conectado ao server
-                        server_marked = true;
-                    }
-
-                    // envia ao server via HTTP
-                    std::string body = Protocol::serialize(pkt);
-                    std::string resp;
-                    bool ok = http_post_json("http://10.0.0.10:8080/api/mesh", body, resp);
-
-                    // devolve resposta (se houver) ao node-edge pela UART
-                    if (ok && !resp.empty())
-                    {
-                        resp.push_back('\n');
-                        uart_write_bytes(UART_PORT, resp.c_str(), resp.size());
-                    }
-
-                    LedManager::on_packet_received(); // pisca no tráfego
+                    if (ch == '\n')
+                        break;
+                    acc.push_back((char)ch);
+                    if (acc.size() > 12)
+                        acc.erase(acc.begin()); // evita linha de header absurda
+                }
+                else
+                {
+                    vTaskDelay(pdMS_TO_TICKS(5));
                 }
             }
-            vTaskDelay(pdMS_TO_TICKS(10));
-        }
-    }
+            return acc;
+        };
 
-    // --- Envio direto para o node-edge (UART TX) ---
-    void Gateway::send(const Protocol::Packet &packet)
-    {
-        std::string json = Protocol::serialize(packet);
-        json.push_back('\n');
-        uart_write_bytes(UART_PORT, json.c_str(), json.size());
-        LedManager::on_packet_received();
+        std::vector<uint8_t> jsonBuf(kBufSize);
+
+        for (;;)
+        {
+            // lê header <len>\n
+            std::string lenStr = read_line();
+            if (lenStr.empty())
+                continue;
+
+            int len = atoi(lenStr.c_str());
+            if (len <= 0 || len > (int)jsonBuf.size())
+            {
+                ESP_LOGW(TAG, "len inválido na UART: %d", len);
+                continue;
+            }
+
+            int got = 0;
+            while (got < len)
+            {
+                int r = uart_read_bytes(kUartNum, jsonBuf.data() + got, len - got, pdMS_TO_TICKS(100));
+                if (r > 0)
+                    got += r;
+                else
+                    vTaskDelay(pdMS_TO_TICKS(5));
+            }
+
+            std::string json((char *)jsonBuf.data(), len);
+            Protocol::Packet pkt;
+            if (Protocol::parse(json, pkt))
+            {
+                // Pacote vindo da borda: se o destino for "server", sobe pro servidor
+                if (pkt.route.dst == "server")
+                    send(pkt);
+                else
+                    ESP_LOGI(TAG, "UART->GATEWAY RX destino %s (roteie conforme regra)", pkt.route.dst.c_str());
+            }
+            else
+            {
+                ESP_LOGW(TAG, "JSON inválido vindo da UART");
+            }
+        }
     }
 
 } // namespace WetzelMesh

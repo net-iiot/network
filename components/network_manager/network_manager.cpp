@@ -8,6 +8,7 @@
 #include "led_manager.hpp"
 #include "espnow_transport.hpp"
 #include "esp_timer.h"
+#include "border_uart.hpp"
 
 using namespace WetzelMesh;
 
@@ -25,23 +26,29 @@ void NetworkManager::init(bool isGateway)
 {
     s_gateway = isGateway;
 
-    // 1) ESPNOW: base da malha (connectionless)
-    ESPNOWTransport::init();
-
-    // 2) BLE: visibilidade/app (opcional)
-    BLETransport::init(isGateway);
-
-    // 3) Se for gateway, inicia ponte (Wi-Fi/HTTP/UART)
     if (s_gateway)
+    {
+        // GATEWAY: ponte com servidor + UART com nó-borda (sem mesh/ble)
         Gateway::init();
+        ESP_LOGI(TAG, "Network Manager: modo Gateway (mesh/BLE desativados)");
+    }
+    else
+    {
+        // NODE: ESPNOW + BLE + Border UART (se este for o nó-borda)
+        ESPNOWTransport::init();
+        BLETransport::init(false);
 
-    // 4) Manutenção de vizinhos (expurgo e LED de join)
-    xTaskCreatePinnedToCore(&NetworkManager::refresh_neighbors_task, "neighbors", 4096, nullptr, 4, nullptr, 0);
+        // Inicializa a UART da borda (se não houver cabos, apenas não trafega).
+        BorderUart::init();
 
-    // 5) Anúncio HELLO periódico (descoberta automática)
-    start_hello_task();
+        // Registra handler: tudo que vier da UART do gateway entra no roteador
+        BorderUart::set_rx_handler([](const Protocol::Packet &pkt)
+                                   { Router::handle_packet(pkt); });
 
-    ESP_LOGI(TAG, "Network Manager inicializado (%s)", isGateway ? "Gateway" : "Node");
+        xTaskCreatePinnedToCore(&NetworkManager::refresh_neighbors_task, "neighbors", 4096, nullptr, 4, nullptr, 0);
+        start_hello_task();
+        ESP_LOGI(TAG, "Network Manager: modo Node (mesh ESPNOW + BLE + (opcional) Border UART)");
+    }
 }
 
 void NetworkManager::refresh_neighbors_task(void *param)
@@ -53,10 +60,8 @@ void NetworkManager::refresh_neighbors_task(void *param)
 
         for (auto it = s_neighbors.begin(); it != s_neighbors.end();)
         {
-            if ((now - it->last_seen_ms) > 8000) // 8s sem HELLO -> remove
-            {
+            if ((now - it->last_seen_ms) > 8000)
                 it = s_neighbors.erase(it);
-            }
             else
             {
                 any_recent = true;
@@ -64,11 +69,8 @@ void NetworkManager::refresh_neighbors_task(void *param)
             }
         }
 
-        // Node indica "joined" se houver ao menos 1 vizinho recente
         if (!s_gateway)
-        {
             LedManager::set_node_joined(any_recent);
-        }
 
         vTaskDelay(pdMS_TO_TICKS(2000));
     }
@@ -86,8 +88,21 @@ const std::vector<Neighbor> &NetworkManager::neighbors()
 
 bool NetworkManager::send(const Protocol::Packet &p)
 {
-    // Flood simples (broadcast) ou unicast, conforme o Packet::route.dst que você usar.
-    return ESPNOWTransport::send(p);
+    if (s_gateway)
+    {
+        // Gateway: sempre envia ao nó-borda via UART (ele injeta na mesh)
+        return Gateway::send_to_border(p);
+    }
+    else
+    {
+        // Nó:
+        // Se o destino é o gateway e este nó é a borda (UART ativa), sobe por UART.
+        if (p.route.dst == "gateway" && BorderUart::is_enabled())
+            return BorderUart::send_to_gateway(p);
+
+        // Caso contrário, envia pela mesh ESPNOW
+        return ESPNOWTransport::send(p);
+    }
 }
 
 void NetworkManager::handle_incoming(const Protocol::Packet &packet)
@@ -95,28 +110,38 @@ void NetworkManager::handle_incoming(const Protocol::Packet &packet)
     ESP_LOGI("NETMAN", "RX %s -> %s", packet.route.src.c_str(), packet.route.dst.c_str());
     LedManager::on_packet_received();
 
-    // Evitar loops: não reencaminhar HELLO nem rebroadcast cego
-    if (packet.route.dst == "broadcast")
+    if (s_gateway)
     {
-        if (packet.type == Protocol::PacketType::EVENT && packet.method == "HELLO")
-        {
-            // HELLO só atualiza vizinhança; não reflooda
-            return;
-        }
-
-        // (Se quiser propagar outros eventos de broadcast, descomente)
-        // NetworkManager::send(packet);
+        if (packet.route.dst == "server")
+            Gateway::send(packet);
+        else
+            Gateway::send_to_border(packet);
         return;
     }
+
+    // Em nó:
+    if (packet.type == Protocol::PacketType::EVENT && packet.method == "HELLO")
+        return; // não floodar HELLO
+
+    if (packet.route.dst == "gateway")
+    {
+        // encaminhamento “para cima” — mesma regra do send()
+        if (BorderUart::is_enabled())
+            BorderUart::send_to_gateway(packet);
+        else
+            ESPNOWTransport::send(packet);
+        return;
+    }
+
+    // Broadcast/controlado — comente/descomente conforme a necessidade
+    // if (packet.route.dst == "broadcast") ESPNOWTransport::send(packet);
 }
 
 void NetworkManager::start_hello_task()
 {
     auto hello_task = [](void *)
     {
-        // Aguarda ESPNOW estabilizar (peer e canal) antes do 1º HELLO
-        vTaskDelay(pdMS_TO_TICKS(400));
-
+        vTaskDelay(pdMS_TO_TICKS(400)); // aguarda mesh estabilizar
         for (;;)
         {
             Protocol::Packet hello{};
@@ -127,7 +152,7 @@ void NetworkManager::start_hello_task()
             hello.body = R"({"t":"hello"})";
 
             ESPNOWTransport::send(hello);
-            vTaskDelay(pdMS_TO_TICKS(2000)); // HELLO a cada 2s
+            vTaskDelay(pdMS_TO_TICKS(2000));
         }
     };
     xTaskCreatePinnedToCore(hello_task, "hello_task", 4096, nullptr, 4, nullptr, tskNO_AFFINITY);
