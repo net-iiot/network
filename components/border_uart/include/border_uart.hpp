@@ -1,33 +1,33 @@
 #pragma once
+#include <functional>
 #include <string>
 #include "protocol.hpp"
 
-namespace WetzelMesh
-{
+namespace WetzelMesh {
 
-    class BorderUart
-    {
-    public:
-        using RxHandler = void (*)(const Protocol::Packet &pkt);
+class BorderUart {
+public:
+    using RxHandler = std::function<void(const Protocol::Packet&)>;
 
-        // Inicializa a UART do nó-borda.
-        // Faz HANDSHAKE com o gateway (PING/PONG). Se falhar, desativa e retorna false.
-        static bool init();
+    static bool init();
+    static bool is_enabled();
+    static void set_rx_handler(RxHandler cb);
 
-        // Envia pacote ao GATEWAY via UART (nó-borda → gateway).
-        // Retorna false se a UART não estiver habilitada (sem cabo/handshake).
-        static bool send_to_gateway(const Protocol::Packet &pkt);
+    // Envia JSON/Packet ao gateway pela UART
+    static bool send_to_gateway(const Protocol::Packet& pkt);
 
-        // Indica se a UART está ativa (handshake OK).
-        static bool is_enabled();
+    // ---------- Tornados públicos para resolver o erro de acesso ----------
+    // Handshake simples PING->PONG; retorna true se ok dentro do timeout.
+    static bool do_handshake(unsigned timeout_ms);
 
-        // Registra callback para pacotes recebidos do GATEWAY.
-        static void set_rx_handler(RxHandler cb);
+    // Tarefa de RX bloqueante (criada após handshake ok)
+    static void uart_listen_task(void*);
 
-    private:
-        static bool uart_write_json(const std::string &json);
-        static void uart_listen_task(void *);          // lê do gateway e aciona o handler
-        static bool do_handshake(unsigned timeout_ms); // PING → espera PONG
-    };
+    // Escrita com framing <len>\n<json>
+    static bool uart_write_json(const std::string& json);
+
+private:
+    // N/A
+};
 
 } // namespace WetzelMesh

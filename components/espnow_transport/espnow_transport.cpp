@@ -1,10 +1,13 @@
 #include "espnow_transport.hpp"
+
 #include "esp_now.h"
 #include "esp_wifi.h"
 #include "esp_event.h"
 #include "esp_netif.h"
 #include "nvs_flash.h"
 #include "esp_log.h"
+#include "esp_idf_version.h" // para ESP_IDF_VERSION_VAL
+
 #include "router.hpp"
 #include "led_manager.hpp"
 #include "network_manager.hpp"
@@ -17,32 +20,20 @@ namespace WetzelMesh
     // endereço broadcast (6 bytes)
     static const uint8_t kBroadcast[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
+    // Assinaturas compatíveis com IDF 5.5.1
+    static void espnow_send_thunk(const wifi_tx_info_t *info, esp_now_send_status_t status);
+    static void espnow_recv_thunk(const esp_now_recv_info_t *info, const uint8_t *data, int len);
+
     const uint8_t *ESPNOWTransport::broadcast_addr()
     {
         return kBroadcast;
     }
 
-    static void espnow_recv_thunk(const esp_now_recv_info_t *info,
-                                  const uint8_t *data, int len)
-    {
-        const uint8_t *mac = info ? info->src_addr : nullptr;
-        int rssi = 0;
-
-#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 1, 0)
-        if (info && info->rx_ctrl)
-            rssi = info->rx_ctrl->rssi;
-#else
-        if (info)
-            rssi = info->rx_ctrl.rssi;
-#endif
-
-        WetzelMesh::ESPNOWTransport::on_recv_cb(mac, data, len, rssi);
-    }
-
     bool ESPNOWTransport::ensure_wifi_started()
     {
-        ESP_ERROR_CHECK(esp_netif_init());
-        (void)esp_event_loop_create_default(); // ignora erro se já criado
+        // Base do TCP/IP + loop de eventos (idempotentes)
+        (void)esp_event_loop_create_default();
+        (void)esp_netif_init();
         (void)esp_netif_create_default_wifi_sta();
 
         wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
@@ -52,26 +43,34 @@ namespace WetzelMesh
             ESP_LOGE(TAG, "esp_wifi_init: %s", esp_err_to_name(err));
             return false;
         }
+
         ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
         ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+        ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE)); // sem power-save para menor latência
 
         err = esp_wifi_start();
         if (err != ESP_OK && err != ESP_ERR_WIFI_NOT_INIT && err != ESP_ERR_WIFI_CONN)
         {
             ESP_LOGW(TAG, "esp_wifi_start: %s", esp_err_to_name(err));
         }
+
+        ESP_LOGI(TAG, "Wi-Fi STA iniciado.");
         return true;
     }
 
     bool ESPNOWTransport::ensure_channel_fixed()
     {
-        // Quando não associado, fixe um canal estático compatível com a malha
         esp_err_t err = esp_wifi_set_channel(kESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE);
         if (err != ESP_OK)
         {
             ESP_LOGE(TAG, "set_channel=%d: %s", kESPNOW_CHANNEL, esp_err_to_name(err));
             return false;
         }
+
+        uint8_t ch = 0;
+        wifi_second_chan_t sc = WIFI_SECOND_CHAN_NONE;
+        esp_wifi_get_channel(&ch, &sc);
+        ESP_LOGI(TAG, "Canal ESPNOW fixado em %u.", (unsigned)ch);
         return true;
     }
 
@@ -79,12 +78,21 @@ namespace WetzelMesh
     {
 #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(4, 4, 0)
         if (esp_now_is_peer_exist(kBroadcast))
+        {
+            esp_now_peer_info_t peer{};
+            memcpy(peer.peer_addr, kBroadcast, 6);
+            peer.ifidx = WIFI_IF_STA;
+            peer.channel = kESPNOW_CHANNEL;
+            peer.encrypt = false;
+            (void)esp_now_mod_peer(&peer);
             return true;
+        }
 #endif
-        esp_now_peer_info_t peer = {};
+
+        esp_now_peer_info_t peer{};
         memcpy(peer.peer_addr, kBroadcast, 6);
         peer.ifidx = WIFI_IF_STA;
-        peer.channel = kESPNOW_CHANNEL; // quando STA estiver associado, o rádio fica no canal do AP
+        peer.channel = kESPNOW_CHANNEL;
         peer.encrypt = false;
 
         esp_err_t err = esp_now_add_peer(&peer);
@@ -99,6 +107,11 @@ namespace WetzelMesh
 
     void ESPNOWTransport::init()
     {
+#ifdef CONFIG_WETZEL_IS_GATEWAY
+        ESP_LOGW(TAG, "Init ignorado: este firmware esta em modo Gateway.");
+        return;
+#endif
+
         ESP_LOGI(TAG, "Inicializando ESPNOW...");
         if (!ensure_wifi_started())
         {
@@ -106,11 +119,10 @@ namespace WetzelMesh
             return;
         }
 
-        // Se não associado a AP, travamos no canal fixo
         ensure_channel_fixed();
 
-        // Reinit seguro
         (void)esp_now_deinit();
+
         esp_err_t err = esp_now_init();
         if (err != ESP_OK)
         {
@@ -118,7 +130,10 @@ namespace WetzelMesh
             return;
         }
 
+        // Callbacks (assinaturas IDF 5.5.1)
         ESP_ERROR_CHECK(esp_now_register_recv_cb(espnow_recv_thunk));
+        ESP_ERROR_CHECK(esp_now_register_send_cb(espnow_send_thunk));
+
         ensure_broadcast_peer();
 
         ESP_LOGI(TAG, "ESPNOW iniciado (canal base %d)", kESPNOW_CHANNEL);
@@ -126,12 +141,15 @@ namespace WetzelMesh
 
     bool ESPNOWTransport::send(const Protocol::Packet &p)
     {
-        // log de intenção de envio pela malha
+#ifdef CONFIG_WETZEL_IS_GATEWAY
+        ESP_LOGW(TAG, "send() ignorado: Gateway nao usa ESPNOW.");
+        return false;
+#endif
+
         const std::string payload = Protocol::serialize(p);
         ESP_LOGI(TAG, "TX[MESH] %s -> %s (%u bytes)",
                  p.route.src.c_str(), p.route.dst.c_str(), (unsigned)payload.size());
 
-        // Garante canal (quando não associado) e peer
         ensure_channel_fixed();
         if (!ensure_broadcast_peer())
         {
@@ -162,10 +180,45 @@ namespace WetzelMesh
             return false;
         }
 
-        LedManager::blink(TrafficSource::MESH); // ATUALIZADO
+        LedManager::blink(TrafficSource::MESH);
         return true;
     }
 
+    // ---------- Callbacks low-level ----------
+
+    static void espnow_send_thunk(const wifi_tx_info_t *info, esp_now_send_status_t st)
+    {
+        // Em IDF 5.5.1 o campo é 'des_addr'; em versões mais antigas era 'peer_addr'.
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 4, 0)
+        const uint8_t *mac = (info ? info->des_addr : nullptr);
+#else
+        const uint8_t *mac = (info ? info->peer_addr : nullptr);
+#endif
+
+        ESP_LOGI(TAG, "TX-ACK[MESH] dst=%02X:%02X:%02X:%02X:%02X:%02X status=%s",
+                 mac ? mac[0] : 0, mac ? mac[1] : 0, mac ? mac[2] : 0,
+                 mac ? mac[3] : 0, mac ? mac[4] : 0, mac ? mac[5] : 0,
+                 (st == ESP_NOW_SEND_SUCCESS) ? "OK" : "FAIL");
+    }
+
+    static void espnow_recv_thunk(const esp_now_recv_info_t *info, const uint8_t *data, int len)
+    {
+        const uint8_t *mac = info ? info->src_addr : nullptr;
+        int rssi = 0;
+
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 1, 0)
+        if (info && info->rx_ctrl)
+            rssi = info->rx_ctrl->rssi;
+#else
+        if (info)
+            rssi = info->rx_ctrl.rssi;
+#endif
+
+        // Repasse para alto nível
+        WetzelMesh::ESPNOWTransport::on_recv_cb(mac, data, len, rssi);
+    }
+
+    // on_recv_cb definido no seu .hpp antigo, mantido:
     void ESPNOWTransport::on_recv_cb(const uint8_t * /*mac*/, const uint8_t *data, int len, int rssi)
     {
         if (len <= 0)
@@ -175,14 +228,14 @@ namespace WetzelMesh
         Protocol::Packet pkt;
         if (Protocol::parse(s, pkt))
         {
-            ESP_LOGI(TAG, "RX[MESH] from=%s dst=%s rssi=%d (%d bytes)",
+            ESP_LOGI(TAG, "RX[MESH] src=%s dst=%s rssi=%d (%d bytes)",
                      pkt.route.src.c_str(), pkt.route.dst.c_str(), rssi, len);
 
-            if(pkt.type == Protocol::PacketType::EVENT && pkt.method == "HELLO")
+            if (pkt.type == Protocol::PacketType::EVENT && pkt.method == "HELLO")
                 NetworkManager::on_hello(pkt.route.src, rssi);
 
             Router::handle_packet(pkt);
-            LedManager::blink(TrafficSource::MESH); // ATUALIZADO
+            LedManager::blink(TrafficSource::MESH);
         }
         else
         {

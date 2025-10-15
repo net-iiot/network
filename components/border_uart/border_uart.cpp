@@ -23,6 +23,9 @@ namespace WetzelMesh
     static bool s_enabled = false;
     static BorderUart::RxHandler s_rx_handler = nullptr;
 
+    // Forward local
+    static void handshake_retry_task(void *);
+
     bool BorderUart::init()
     {
         if (s_enabled)
@@ -39,6 +42,7 @@ namespace WetzelMesh
         if (err != ESP_OK)
         {
             ESP_LOGW(TAG, "uart_param_config: %s", esp_err_to_name(err));
+            LedManager::set_uart_enabled(false); // LED26 ON (sem link)
             return false;
         }
 
@@ -46,6 +50,7 @@ namespace WetzelMesh
         if (err != ESP_OK)
         {
             ESP_LOGW(TAG, "uart_set_pin: %s", esp_err_to_name(err));
+            LedManager::set_uart_enabled(false);
             return false;
         }
 
@@ -53,19 +58,21 @@ namespace WetzelMesh
         if (err != ESP_OK)
         {
             ESP_LOGW(TAG, "uart_driver_install: %s", esp_err_to_name(err));
+            LedManager::set_uart_enabled(false);
             return false;
         }
 
-        xTaskCreatePinnedToCore(uart_listen_task, "border_uart_rx", 4096, nullptr, 5, nullptr, tskNO_AFFINITY);
+        // Estado inicial: sem link => LED 26 aceso
+        s_enabled = false;
+        LedManager::set_uart_enabled(false);
 
-        s_enabled = true;
-        LedManager::set_uart_enabled(true); // NOVO: Sinaliza que a UART está ativa no Node
-        ESP_LOGI(TAG, "BORDER UART ativa (TX=%d RX=%d, %dbps)", kTxPin, kRxPin, kBaud);
+        // Tarefa que fica tentando handshake de 1 em 1 segundo
+        xTaskCreatePinnedToCore(handshake_retry_task, "border_uart_hs", 4096, nullptr, 5, nullptr, tskNO_AFFINITY);
+        ESP_LOGI(TAG, "UART configurada; aguardando handshake (PING->PONG).");
         return true;
     }
 
     bool BorderUart::is_enabled() { return s_enabled; }
-
     void BorderUart::set_rx_handler(RxHandler cb) { s_rx_handler = cb; }
 
     bool BorderUart::send_to_gateway(const Protocol::Packet &pkt)
@@ -75,7 +82,12 @@ namespace WetzelMesh
         std::string json = Protocol::serialize(pkt);
         ESP_LOGI(TAG, "TX[UART BORDER->GW] %s -> %s (%u bytes)",
                  pkt.route.src.c_str(), pkt.route.dst.c_str(), (unsigned)json.size());
-        return uart_write_json(json);
+        bool ok = uart_write_json(json);
+        if (ok)
+        {
+            LedManager::blink(TrafficSource::UART); // Pisca LED 26 no TX
+        }
+        return ok;
     }
 
     bool BorderUart::uart_write_json(const std::string &json)
@@ -89,7 +101,7 @@ namespace WetzelMesh
         int w2 = uart_write_bytes(kUartNum, json.c_str(), json.size());
         if (w1 < 0 || w2 < 0)
         {
-            ESP_LOGE(TAG, "TX[UART BORDER->GW] erro driver");
+            ESP_LOGE(TAG, "TX[UART BORDER->GW] erro driver (w1=%d w2=%d)", w1, w2);
             return false;
         }
         return true;
@@ -97,7 +109,7 @@ namespace WetzelMesh
 
     bool BorderUart::do_handshake(unsigned timeout_ms)
     {
-        // Envia um PACKET "PING" no nosso framing <len>\n<json> e espera "PONG".
+        // Envia um PACKET "PING" no framing <len>\n<json> e espera "PONG".
         Protocol::Packet ping{};
         ping.type = Protocol::PacketType::EVENT;
         ping.method = "PING";
@@ -107,7 +119,7 @@ namespace WetzelMesh
 
         std::string json = Protocol::serialize(ping);
 
-        // Pequeno flush do RX antes do PING
+        // Flush do RX antes do PING
         uint8_t tmp[64];
         while (uart_read_bytes(kUartNum, tmp, sizeof(tmp), 0) > 0)
         { /* flush */
@@ -117,7 +129,7 @@ namespace WetzelMesh
         if (!uart_write_json(json))
             return false;
 
-        // Aguarda PONG de volta (bloqueante, simples, sem task).
+        // Aguarda PONG (bloqueante, simples)
         std::string acc;
         acc.reserve(16);
 
@@ -166,8 +178,7 @@ namespace WetzelMesh
         if (!Protocol::parse(rxJson, resp))
             return false;
 
-        // Esperamos um EVENT PONG vindo do gateway.
-        bool ok = (resp.method == "PONG");
+        bool ok = (resp.type == Protocol::PacketType::EVENT && resp.method == "PONG");
         if (ok)
             ESP_LOGI(TAG, "Handshake OK (PONG do gateway).");
         return ok;
@@ -231,13 +242,46 @@ namespace WetzelMesh
             {
                 ESP_LOGI(TAG, "RX[UART BORDER<-GW] from=%s dst=%s (%d bytes)",
                          pkt.route.src.c_str(), pkt.route.dst.c_str(), len);
-                LedManager::blink(TrafficSource::UART); // ATUALIZADO
+
+                LedManager::blink(TrafficSource::UART); // Pisca LED 26 no RX
+
                 if (s_rx_handler)
                     s_rx_handler(pkt);
             }
             else
             {
                 ESP_LOGW(TAG, "RX[UART BORDER<-GW] JSON invalido");
+            }
+        }
+    }
+
+    // Tarefa que tenta handshake periodicamente até conectar
+    static void handshake_retry_task(void *)
+    {
+        for (;;)
+        {
+            if (!s_enabled)
+            {
+                bool ok = BorderUart::do_handshake(1500);
+                if (ok)
+                {
+                    s_enabled = true;
+                    LedManager::set_uart_enabled(true); // LED26 OFF (link ativo)
+                    // Sobe a tarefa de RX e sai do retry
+                    xTaskCreatePinnedToCore(BorderUart::uart_listen_task, "border_uart_rx", 4096, nullptr, 5, nullptr, tskNO_AFFINITY);
+                    vTaskDelete(nullptr);
+                }
+                else
+                {
+                    // Mantém LED 26 ON; tenta de novo em 1s
+                    LedManager::set_uart_enabled(false);
+                    ESP_LOGW(TAG, "Handshake UART sem resposta; nova tentativa em 1s.");
+                    vTaskDelay(pdMS_TO_TICKS(1000));
+                }
+            }
+            else
+            {
+                vTaskDelete(nullptr);
             }
         }
     }

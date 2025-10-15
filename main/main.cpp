@@ -25,13 +25,12 @@ extern "C" void app_main(void)
     constexpr bool kIsGateway = false;
 #endif
 
-    // Logs mais verbosos nos nossos módulos
     esp_log_level_set("*", ESP_LOG_WARN);
-    esp_log_level_set(TAG, ESP_LOG_INFO);
+    esp_log_level_set("WETZELMESH", ESP_LOG_INFO);
     esp_log_level_set("GATEWAY", ESP_LOG_INFO);
-    esp_log_level_set("NETMAN", ESP_LOG_INFO);
     esp_log_level_set("BORDER_UART", ESP_LOG_INFO);
-    esp_log_level_set("ESPNOW", ESP_LOG_INFO); // no gateway NÃO deve aparecer "ESPNOW iniciado"
+    esp_log_level_set("NETMAN", ESP_LOG_INFO);
+    esp_log_level_set("ESPNOW", ESP_LOG_INFO);
 
     ESP_LOGI(TAG, "Iniciando WetzelMesh (%s)", kIsGateway ? "Gateway" : "Node");
 
