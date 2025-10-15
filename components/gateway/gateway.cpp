@@ -4,6 +4,7 @@
 #include "protocol.hpp"
 #include "network_manager.hpp"
 #include "esp_bt.h"
+#include "led_manager.hpp" // Inclui LedManager e TrafficSource
 
 namespace WetzelMesh
 {
@@ -22,11 +23,17 @@ namespace WetzelMesh
         // Desativa BLE/BT e libera RAM
         esp_err_t r = esp_bt_controller_mem_release(ESP_BT_MODE_BTDM);
         if (r == ESP_OK)
+        {
             ESP_LOGI(TAG, "Memoria BT liberada.");
+        }
         else if (r == ESP_ERR_INVALID_STATE)
-            ESP_LOGW(TAG, "BT ja liberado ou ativo.");
+        {
+            ESP_LOGW(TAG, "BT ja liberado ou controlador ativo.");
+        }
         else
+        {
             ESP_LOGW(TAG, "Falha liberar BT: %s", esp_err_to_name(r));
+        }
 
         // UART GW<->Borda
         uart_config_t cfg{};
@@ -51,6 +58,7 @@ namespace WetzelMesh
         ESP_LOGI(TAG, "TX[SERVER] from=%s dst=%s (%u bytes)",
                  pkt.route.src.c_str(), pkt.route.dst.c_str(), (unsigned)json.size());
         // TODO: envio real ao servidor
+        LedManager::blink(TrafficSource::SERVER); // Pisca LED p/ TX ao servidor
         return true;
     }
 
@@ -59,6 +67,7 @@ namespace WetzelMesh
         std::string json = Protocol::serialize(pkt);
         ESP_LOGI(TAG, "TX[UART GW->BORDER] %s -> %s (%u bytes)",
                  pkt.route.src.c_str(), pkt.route.dst.c_str(), (unsigned)json.size());
+        LedManager::blink(TrafficSource::UART); // Pisca LED p/ TX UART
         return uart_write_json(json);
     }
 
@@ -97,10 +106,12 @@ namespace WetzelMesh
                         break;
                     acc.push_back((char)ch);
                     if (acc.size() > 12)
-                        acc.erase(acc.begin());
+                        acc.erase(acc.begin()); // evita header absurdo
                 }
                 else
+                {
                     vTaskDelay(pdMS_TO_TICKS(5));
+                }
             }
             return acc;
         };
@@ -109,6 +120,7 @@ namespace WetzelMesh
 
         for (;;)
         {
+            // ------------- lê header <len>\n -------------
             std::string lenStr = read_line();
             if (lenStr.empty())
                 continue;
@@ -120,6 +132,7 @@ namespace WetzelMesh
                 continue;
             }
 
+            // ------------- lê corpo JSON -------------
             int got = 0;
             while (got < len)
             {
@@ -132,20 +145,41 @@ namespace WetzelMesh
 
             std::string json((char *)jsonBuf.data(), len);
             Protocol::Packet pkt;
-            if (Protocol::parse(json, pkt))
+            if (!Protocol::parse(json, pkt))
             {
-                ESP_LOGI(TAG, "RX[UART GW<-BORDER] from=%s dst=%s (%d bytes)",
-                         pkt.route.src.c_str(), pkt.route.dst.c_str(), len);
+                ESP_LOGW(TAG, "RX[UART GW<-BORDER] JSON invalido");
+                continue;
+            }
 
-                // Se destino for servidor, sobe
-                if (pkt.route.dst == "server")
-                    send(pkt);
-                else
-                    ESP_LOGI(TAG, "GW roteamento local pendente p/ dst=%s", pkt.route.dst.c_str());
+            ESP_LOGI(TAG, "RX[UART GW<-BORDER] from=%s dst=%s (%d bytes)",
+                     pkt.route.src.c_str(), pkt.route.dst.c_str(), len);
+            LedManager::blink(TrafficSource::UART); // Pisca LED p/ RX UART
+
+            // --------- HANDSHAKE: responde somente se for PING ---------
+            if (pkt.type == Protocol::PacketType::EVENT && pkt.method == "PING")
+            {
+                Protocol::Packet pong{};
+                pong.type = Protocol::PacketType::EVENT; // 👈 EVENT (não RESPONSE)
+                pong.method = "PONG";
+                pong.route.src = "gateway";
+                pong.route.dst = pkt.route.src;
+                pong.body = R"({"status":"ok"})";
+
+                ESP_LOGI(TAG, "HANDSHAKE: recebido PING; enviando PONG a %s.", pong.route.dst.c_str());
+                send_to_border(pong);
+                continue; // não processa além disso
+            }
+
+            // --------- ROTEAMENTO (gateway não participa da mesh) ---------
+            if (pkt.route.dst == "server")
+            {
+                // Sobe pro backend
+                send(pkt);
             }
             else
             {
-                ESP_LOGW(TAG, "RX[UART GW<-BORDER] JSON invalido");
+                // Qualquer outro destino não é roteado pelo gateway
+                ESP_LOGI(TAG, "GW: destino nao-servidor (%s); nenhum roteamento aplicado.", pkt.route.dst.c_str());
             }
         }
     }

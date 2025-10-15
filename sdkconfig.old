@@ -433,13 +433,12 @@ CONFIG_PARTITION_TABLE_MD5=y
 # end of Partition Table
 
 #
-# Wetzel Mesh
+# Wetzel Mesh (Configurações)
 #
 CONFIG_WM_ROLE_GATEWAY=y
-# CONFIG_WM_ROLE_NODE_EDGE is not set
-# CONFIG_WM_ROLE_NODE_RELAY is not set
-# CONFIG_WETZEL_ENABLE_BLE is not set
-# end of Wetzel Mesh
+# CONFIG_WM_ROLE_NODE is not set
+CONFIG_WETZEL_IS_GATEWAY=y
+# end of Wetzel Mesh (Configurações)
 
 #
 # Compiler options

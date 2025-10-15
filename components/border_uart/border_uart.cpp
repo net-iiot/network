@@ -3,6 +3,8 @@
 #include "esp_log.h"
 #include "protocol.hpp"
 #include "led_manager.hpp"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include <vector>
 #include <cstdlib>
 
@@ -57,6 +59,7 @@ namespace WetzelMesh
         xTaskCreatePinnedToCore(uart_listen_task, "border_uart_rx", 4096, nullptr, 5, nullptr, tskNO_AFFINITY);
 
         s_enabled = true;
+        LedManager::set_uart_enabled(true); // NOVO: Sinaliza que a UART está ativa no Node
         ESP_LOGI(TAG, "BORDER UART ativa (TX=%d RX=%d, %dbps)", kTxPin, kRxPin, kBaud);
         return true;
     }
@@ -90,6 +93,84 @@ namespace WetzelMesh
             return false;
         }
         return true;
+    }
+
+    bool BorderUart::do_handshake(unsigned timeout_ms)
+    {
+        // Envia um PACKET "PING" no nosso framing <len>\n<json> e espera "PONG".
+        Protocol::Packet ping{};
+        ping.type = Protocol::PacketType::EVENT;
+        ping.method = "PING";
+        ping.route.src = "border";
+        ping.route.dst = "gateway";
+        ping.body = "{}";
+
+        std::string json = Protocol::serialize(ping);
+
+        // Pequeno flush do RX antes do PING
+        uint8_t tmp[64];
+        while (uart_read_bytes(kUartNum, tmp, sizeof(tmp), 0) > 0)
+        { /* flush */
+        }
+
+        // Envia PING
+        if (!uart_write_json(json))
+            return false;
+
+        // Aguarda PONG de volta (bloqueante, simples, sem task).
+        std::string acc;
+        acc.reserve(16);
+
+        auto read_line = [&]() -> std::string
+        {
+            acc.clear();
+            const TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(timeout_ms);
+            while (xTaskGetTickCount() < deadline)
+            {
+                uint8_t ch;
+                int r = uart_read_bytes(kUartNum, &ch, 1, pdMS_TO_TICKS(20));
+                if (r == 1)
+                {
+                    if (ch == '\n')
+                        break;
+                    if (acc.size() < 12)
+                        acc.push_back((char)ch);
+                }
+            }
+            return acc;
+        };
+
+        std::vector<uint8_t> buf(kBufSize);
+
+        std::string lenStr = read_line();
+        if (lenStr.empty())
+            return false;
+
+        int len = atoi(lenStr.c_str());
+        if (len <= 0 || len > (int)buf.size())
+            return false;
+
+        int got = 0;
+        const TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(timeout_ms);
+        while (got < len && xTaskGetTickCount() < deadline)
+        {
+            int r = uart_read_bytes(kUartNum, buf.data() + got, len - got, pdMS_TO_TICKS(50));
+            if (r > 0)
+                got += r;
+        }
+        if (got != len)
+            return false;
+
+        std::string rxJson((char *)buf.data(), len);
+        Protocol::Packet resp;
+        if (!Protocol::parse(rxJson, resp))
+            return false;
+
+        // Esperamos um EVENT PONG vindo do gateway.
+        bool ok = (resp.method == "PONG");
+        if (ok)
+            ESP_LOGI(TAG, "Handshake OK (PONG do gateway).");
+        return ok;
     }
 
     void BorderUart::uart_listen_task(void *)
@@ -150,7 +231,7 @@ namespace WetzelMesh
             {
                 ESP_LOGI(TAG, "RX[UART BORDER<-GW] from=%s dst=%s (%d bytes)",
                          pkt.route.src.c_str(), pkt.route.dst.c_str(), len);
-                LedManager::on_packet_received();
+                LedManager::blink(TrafficSource::UART); // ATUALIZADO
                 if (s_rx_handler)
                     s_rx_handler(pkt);
             }

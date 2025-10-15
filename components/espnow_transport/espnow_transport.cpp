@@ -162,7 +162,7 @@ namespace WetzelMesh
             return false;
         }
 
-        LedManager::on_packet_received();
+        LedManager::blink(TrafficSource::MESH); // ATUALIZADO
         return true;
     }
 
@@ -178,11 +178,11 @@ namespace WetzelMesh
             ESP_LOGI(TAG, "RX[MESH] from=%s dst=%s rssi=%d (%d bytes)",
                      pkt.route.src.c_str(), pkt.route.dst.c_str(), rssi, len);
 
-            if (pkt.type == Protocol::PacketType::EVENT && pkt.method == "HELLO")
+            if(pkt.type == Protocol::PacketType::EVENT && pkt.method == "HELLO")
                 NetworkManager::on_hello(pkt.route.src, rssi);
 
             Router::handle_packet(pkt);
-            LedManager::on_packet_received();
+            LedManager::blink(TrafficSource::MESH); // ATUALIZADO
         }
         else
         {

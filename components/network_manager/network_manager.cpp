@@ -34,6 +34,7 @@ void NetworkManager::init(bool isGateway)
         BLETransport::init(false);
 
         BorderUart::init();
+        LedManager::set_uart_enabled(BorderUart::is_enabled()); // NOVO: Atualiza estado do LED UART
         BorderUart::set_rx_handler([](const Protocol::Packet &pkt)
                                    {
             // Tudo que descer do gateway pela UART entra no roteador
@@ -96,7 +97,6 @@ bool NetworkManager::send(const Protocol::Packet &p)
 void NetworkManager::handle_incoming(const Protocol::Packet &packet)
 {
     ESP_LOGI(TAG, "HANDLE_INCOMING: %s -> %s", packet.route.src.c_str(), packet.route.dst.c_str());
-    LedManager::on_packet_received();
 
     if (s_gateway)
     {
@@ -151,6 +151,7 @@ void NetworkManager::start_hello_task()
             hello.body = R"({"t":"hello"})";
 
             ESP_LOGI(TAG, "TX[HELLO] %s -> broadcast", hello.route.src.c_str());
+            // blink no hello será tratado dentro do ESPNOWTransport::send(hello);
             ESPNOWTransport::send(hello);
             vTaskDelay(pdMS_TO_TICKS(2000));
         }

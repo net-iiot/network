@@ -1,14 +1,38 @@
-menu "Wetzel Mesh"
-    choice
-        prompt "Device Role"
-        default WM_ROLE_NODE_RELAY
-        config WM_ROLE_GATEWAY
-            bool "Gateway (Wi-Fi+HTTP+UART)"
-        config WM_ROLE_NODE_EDGE
-            bool "Node de Borda (BLE+UART+Mesh)"
-        config WM_ROLE_NODE_RELAY
-            bool "Node Relay (Mesh apenas)"
-        config WETZEL_ENABLE_BLE
-            bool "Enable BLE transport"
-    endchoice
+menu "Wetzel Mesh (Configurações)"
+
+choice WM_DEVICE_ROLE
+    prompt "Device Role"
+    default WM_ROLE_GATEWAY
+    help
+      Selecione o papel do firmware que você está compilando.
+
+config WM_ROLE_GATEWAY
+    bool "Gateway (Wi-Fi/AP + UART ↔ Border; BLE/ESPNOW OFF)"
+    help
+      Compila/roda como GATEWAY:
+      - BLE e ESPNOW desativados;
+      - Apenas UART com o nó-borda e caminho ao servidor.
+
+config WM_ROLE_NODE
+    bool "Node Único (Mesh ESPNOW + UART opcional; BLE opcional)"
+    help
+      Compila/roda como NODE:
+      - Mesh ESPNOW ativa;
+      - UART opcional: vira “borda” se fizer handshake com o gateway;
+      - BLE pode ser ligado/desligado pelo switch abaixo.
+endchoice
+
+config WETZEL_IS_GATEWAY
+    bool
+    default y if WM_ROLE_GATEWAY
+    default n if WM_ROLE_NODE
+
+config WETZEL_ENABLE_BLE
+    bool "Enable BLE transport (apenas para NODE)"
+    depends on WM_ROLE_NODE
+    default y
+    help
+      Ativa o transporte BLE nos nós (advertising/scan/GATT conforme BLETransport).
+      Desligar reduz consumo/ruído de logs. A malha via ESPNOW continua funcionando.
+
 endmenu

@@ -22,8 +22,6 @@ namespace WetzelMesh
         ESP_LOGI(TAG, "Roteando pacote: %s -> %s",
                  pkt.route.src.c_str(), pkt.route.dst.c_str());
 
-        LedManager::on_packet_received();
-
         // Não roteia HELLO
         if (pkt.type == Protocol::PacketType::EVENT && pkt.method == std::string("HELLO"))
             return;

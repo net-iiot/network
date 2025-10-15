@@ -173,7 +173,7 @@ static void gatts_event_handler(esp_gatts_cb_event_t event,
             {
                 ESP_LOGI(TAG, "📩 BLE pacote RX: %s -> %s",
                          packet.route.src.c_str(), packet.route.dst.c_str());
-                LedManager::on_packet_received();
+                LedManager::blink(TrafficSource::MESH); // ATUALIZADO (tráfego Mesh/BLE)
                 NetworkManager::handle_incoming(packet);
             }
         }
