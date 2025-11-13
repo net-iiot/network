@@ -1,11 +1,11 @@
 {
   "C_Cpp.intelliSenseEngine": "default",
-  "idf.espIdfPathWin": "c:\\Users\\brunow\\Desenvolvimento\\Firmware\\mcu\\espressif\\framework\\v5.5.1\\esp-idf",
-  "idf.pythonInstallPath": "c:\\Users\\brunow\\Desenvolvimento\\Firmware\\mcu\\espressif\\framework\\.espressif\\tools\\idf-python\\3.11.2\\python.exe",
+  "idf.espIdfPathWin": "C:\\Users\\brunow\\esp\\v5.5.1\\esp-idf",
+  "idf.pythonInstallPath": "C:\\Espressif\\tools\\idf-python\\3.11.2\\python.exe",
   "idf.openOcdConfigs": [
     "board/esp32-wrover-kit-3.3v.cfg"
   ],
-  "idf.toolsPathWin": "c:\\Users\\brunow\\Desenvolvimento\\Firmware\\mcu\\espressif\\framework\\.espressif",
+  "idf.toolsPathWin": "C:\\Espressif",
   "idf.customExtraVars": {
     "IDF_TARGET": "esp32"
   },

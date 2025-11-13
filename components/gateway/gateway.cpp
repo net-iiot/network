@@ -1,4 +1,5 @@
 #include "gateway.hpp"
+#include "http_context.hpp"
 #include "esp_log.h"
 #include "driver/uart.h"
 #include "protocol.hpp"
@@ -7,6 +8,17 @@
 #include "led_manager.hpp"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "esp_http_client.h"
+#include "esp_wifi.h"
+#include "esp_netif.h"
+#include "esp_event.h"
+#include "lwip/ip4_addr.h"
+#include "nvs_flash.h"
+#include <string>
+#include <queue>
+#include <mutex>
+#include <cstring>
+#include <cassert>
 
 namespace WetzelMesh
 {
@@ -18,9 +30,26 @@ namespace WetzelMesh
     static constexpr int kRxPin = 16; // RX <- TX do nó-borda
     static constexpr int kBaud = 115200;
     static constexpr size_t kBufSize = 2048;
+    static constexpr size_t kMaxChunkSize = 1500; // Tamanho máximo de chunk
+    
+    // URL do servidor
+    std::string Gateway::s_server_url = "http://localhost:8080";
+    
+    // Fila de requisições HTTP pendentes
+    static std::queue<Protocol::Packet> s_http_request_queue;
+    static std::mutex s_queue_mutex;
 
     // Só a test task permanece como função livre
     static void test_packet_task(void *);
+    static void uart_status_task(void *);
+    static void wifi_reconnect_task(void *);
+    static void wifi_scan_task(void *);
+    
+    // Estado do token no Gateway
+    static bool s_gateway_has_token = false;
+    
+    // Estado WiFi
+    static bool s_wifi_should_reconnect = false;
 
     // ---------------------------------------------------------------------
     // Mantém método privado conforme seu header; não expomos fora da classe
@@ -58,15 +87,311 @@ namespace WetzelMesh
         return (got == len);
     }
 
-    // ---------------------------------------------------------------------
-    void Gateway::init()
+    // Callback para eventos WiFi
+    static void wifi_event_handler(void* arg, esp_event_base_t event_base,
+                                    int32_t event_id, void* event_data)
     {
+        if (event_base == WIFI_EVENT)
+        {
+            switch (event_id)
+            {
+                case WIFI_EVENT_STA_START:
+                    ESP_LOGI(TAG, "WiFi STA iniciado, conectando...");
+                    // Conecta primeiro, scan será feito depois se necessário
+                    esp_wifi_connect();
+                    break;
+                    
+                case WIFI_EVENT_STA_DISCONNECTED:
+                {
+                    wifi_event_sta_disconnected_t* disconnected = (wifi_event_sta_disconnected_t*) event_data;
+                    const char* reason_str = "";
+                    switch (disconnected->reason)
+                    {
+                        case WIFI_REASON_NO_AP_FOUND:
+                            reason_str = "NO_AP_FOUND - Rede não encontrada (verifique SSID)";
+                            // Se não encontrou a rede, faz scan para diagnosticar
+                            xTaskCreatePinnedToCore(wifi_scan_task, "wifi_scan", 4096, nullptr, 3, nullptr, tskNO_AFFINITY);
+                            break;
+                        case WIFI_REASON_AUTH_FAIL:
+                            reason_str = "AUTH_FAIL - Senha incorreta";
+                            break;
+                        case WIFI_REASON_ASSOC_FAIL:
+                            reason_str = "ASSOC_FAIL - Falha na associação";
+                            break;
+                        case WIFI_REASON_HANDSHAKE_TIMEOUT:
+                            reason_str = "HANDSHAKE_TIMEOUT - Timeout no handshake";
+                            break;
+                        default:
+                            reason_str = "Desconhecido";
+                            break;
+                    }
+                    ESP_LOGW(TAG, "WiFi desconectado (reason: %d - %s)", disconnected->reason, reason_str);
+                    LedManager::set_gateway_server_connected(false);
+                    // Sinaliza para task de reconexão (não bloqueia o handler)
+                    s_wifi_should_reconnect = true;
+                    break;
+                }
+                
+                case WIFI_EVENT_STA_CONNECTED:
+                {
+                    wifi_event_sta_connected_t* connected = (wifi_event_sta_connected_t*) event_data;
+                    ESP_LOGI(TAG, "WiFi conectado ao AP: %s (canal %d)", connected->ssid, connected->channel);
+                    break;
+                }
+                
+                default:
+                    break;
+            }
+        }
+        else if (event_base == IP_EVENT)
+        {
+            if (event_id == IP_EVENT_STA_GOT_IP)
+            {
+                ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
+                ESP_LOGI(TAG, "WiFi conectado! IP: " IPSTR ", Máscara: " IPSTR ", Gateway: " IPSTR,
+                         IP2STR(&event->ip_info.ip),
+                         IP2STR(&event->ip_info.netmask),
+                         IP2STR(&event->ip_info.gw));
+                LedManager::set_gateway_server_connected(true);
+            }
+        }
+    }
+
+    // Inicializa e conecta WiFi
+    static void init_wifi()
+    {
+        ESP_LOGI(TAG, "");
+        ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
+        ESP_LOGI(TAG, "INICIANDO CONFIGURAÇÃO WIFI");
+        ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
+        
+        // esp_netif_init e esp_event_loop já foram chamados no main.cpp
+        esp_netif_t *sta_netif = esp_netif_create_default_wifi_sta();
+        if (!sta_netif)
+        {
+            ESP_LOGE(TAG, "Falha ao criar netif WiFi");
+            return;
+        }
+
+        wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+        esp_err_t err = esp_wifi_init(&cfg);
+        if (err != ESP_OK)
+        {
+            ESP_LOGE(TAG, "Falha ao inicializar WiFi: %s", esp_err_to_name(err));
+            return;
+        }
+
+        // Registra handlers de eventos
+        err = esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL);
+        if (err != ESP_OK)
+        {
+            ESP_LOGE(TAG, "Falha ao registrar handler WIFI_EVENT: %s", esp_err_to_name(err));
+            return;
+        }
+        
+        err = esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL);
+        if (err != ESP_OK)
+        {
+            ESP_LOGE(TAG, "Falha ao registrar handler IP_EVENT: %s", esp_err_to_name(err));
+            return;
+        }
+
+        // Obtém credenciais do menuconfig
+        ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
+        ESP_LOGI(TAG, "LENDO CONFIGURAÇÕES WIFI DO MENUCONFIG");
+        ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
+        
+        wifi_config_t wifi_config = {};
+        memset(&wifi_config, 0, sizeof(wifi_config));
+        
+        const char* ssid = nullptr;
+        const char* password = nullptr;
+        
+#ifdef CONFIG_WETZEL_GATEWAY_WIFI_SSID
+        ssid = CONFIG_WETZEL_GATEWAY_WIFI_SSID;
+        ESP_LOGI(TAG, "CONFIG_WETZEL_GATEWAY_WIFI_SSID = '%s'", ssid);
+        ESP_LOGI(TAG, "   Tamanho: %zu bytes", strlen(ssid));
+#else
+        ESP_LOGW(TAG, "CONFIG_WETZEL_GATEWAY_WIFI_SSID não definido, usando padrão");
+        ssid = "WetzelGateway";
+#endif
+
+#ifdef CONFIG_WETZEL_GATEWAY_WIFI_PASSWORD
+        password = CONFIG_WETZEL_GATEWAY_WIFI_PASSWORD;
+        ESP_LOGI(TAG, "CONFIG_WETZEL_GATEWAY_WIFI_PASSWORD = %s", 
+                 (password && strlen(password) > 0) ? "*** (configurada)" : "(vazia)");
+        if (password && strlen(password) > 0)
+        {
+            ESP_LOGI(TAG, "   Tamanho: %zu bytes", strlen(password));
+        }
+#else
+        ESP_LOGW(TAG, "CONFIG_WETZEL_GATEWAY_WIFI_PASSWORD não definido, rede aberta");
+        password = "";
+#endif
+        
+        ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
+        
+        // Processa SSID - remove espaços extras e adiciona logs detalhados
+        if (ssid && strlen(ssid) > 0)
+        {
+            // Remove espaços extras no início e fim
+            const char* ssid_start = ssid;
+            size_t ssid_len = strlen(ssid);
+            
+            // Remove espaços no início
+            while (ssid_len > 0 && (ssid_start[0] == ' ' || ssid_start[0] == '\t'))
+            {
+                ssid_start++;
+                ssid_len--;
+            }
+            
+            // Remove espaços no fim
+            while (ssid_len > 0 && (ssid_start[ssid_len-1] == ' ' || ssid_start[ssid_len-1] == '\t'))
+            {
+                ssid_len--;
+            }
+            
+            if (ssid_len > 0 && ssid_len < sizeof(wifi_config.sta.ssid))
+            {
+                memcpy(wifi_config.sta.ssid, ssid_start, ssid_len);
+                wifi_config.sta.ssid[ssid_len] = '\0';
+                
+                // Log detalhado para debug - mostra cada caractere do SSID
+                ESP_LOGI(TAG, "SSID processado: '%s' (len=%zu)", (char*)wifi_config.sta.ssid, ssid_len);
+                ESP_LOGI(TAG, "SSID bytes hex (primeiros 32):");
+                for (size_t i = 0; i < ssid_len && i < 32; i++)
+                {
+                    ESP_LOGI(TAG, "  [%zu] = 0x%02X ('%c')", i, (unsigned char)wifi_config.sta.ssid[i], 
+                             (wifi_config.sta.ssid[i] >= 32 && wifi_config.sta.ssid[i] < 127) ? 
+                             wifi_config.sta.ssid[i] : '?');
+                }
+            }
+            else
+            {
+                ESP_LOGE(TAG, "SSID inválido (tamanho após trim: %zu, máximo: %zu)", 
+                         ssid_len, sizeof(wifi_config.sta.ssid) - 1);
+                return;
+            }
+        }
+        else
+        {
+            ESP_LOGE(TAG, "SSID vazio ou NULL!");
+            return;
+        }
+        
+        // Processa senha - não força apenas WPA2_PSK, permite WPA3 e mixed
+        if (password && strlen(password) > 0)
+        {
+            size_t pwd_len = strlen(password);
+            if (pwd_len < sizeof(wifi_config.sta.password))
+            {
+                memcpy(wifi_config.sta.password, password, pwd_len);
+                wifi_config.sta.password[pwd_len] = '\0';
+                // Não força apenas WPA2_PSK - threshold mínimo WPA2, mas aceita WPA3 e mixed
+                // O ESP-IDF tentará negociar automaticamente o melhor método suportado
+                wifi_config.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
+            }
+            else
+            {
+                ESP_LOGE(TAG, "Senha muito longa (tamanho: %zu, máximo: %zu)", 
+                         pwd_len, sizeof(wifi_config.sta.password) - 1);
+                wifi_config.sta.password[0] = '\0';
+                wifi_config.sta.threshold.authmode = WIFI_AUTH_OPEN;
+            }
+        }
+        else
+        {
+            // Senha vazia = rede aberta
+            wifi_config.sta.password[0] = '\0';
+            wifi_config.sta.threshold.authmode = WIFI_AUTH_OPEN;
+        }
+
+        // Configurações WiFi
+        wifi_config.sta.pmf_cfg.capable = true;
+        wifi_config.sta.pmf_cfg.required = false;
+        wifi_config.sta.scan_method = WIFI_FAST_SCAN;
+        wifi_config.sta.sort_method = WIFI_CONNECT_AP_BY_SIGNAL;
+        
+        // Configurações adicionais para melhor compatibilidade
+        wifi_config.sta.threshold.rssi = -127; // Aceita qualquer sinal (pode ajustar se necessário)
+        wifi_config.sta.bssid_set = false; // Não força BSSID específico
+
+        ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
+        ESP_LOGI(TAG, "CONFIGURAÇÃO WIFI QUE SERÁ USADA:");
+        ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
+        ESP_LOGI(TAG, "   SSID: '%s'", (char*)wifi_config.sta.ssid);
+        ESP_LOGI(TAG, "   Tamanho do SSID: %zu bytes", strlen((char*)wifi_config.sta.ssid));
+        ESP_LOGI(TAG, "   Senha: %s", 
+                 (password && strlen(password) > 0) ? "*** (configurada)" : "(vazia - rede aberta)");
+        if (password && strlen(password) > 0)
+        {
+            ESP_LOGI(TAG, "   Tamanho da senha: %zu bytes", strlen(password));
+        }
+        ESP_LOGI(TAG, "   Autenticação mínima: %s (aceita WPA2/WPA3/mixed)", 
+                 wifi_config.sta.threshold.authmode == WIFI_AUTH_OPEN ? "OPEN" : "WPA2_PSK");
+        ESP_LOGI(TAG, "   RSSI threshold: %d dBm", wifi_config.sta.threshold.rssi);
+        ESP_LOGI(TAG, "   BSSID fixo: %s", wifi_config.sta.bssid_set ? "SIM" : "NÃO");
+        ESP_LOGI(TAG, "   Scan method: FAST_SCAN");
+        ESP_LOGI(TAG, "   Sort method: BY_SIGNAL");
+        ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
+
+        err = esp_wifi_set_mode(WIFI_MODE_STA);
+        if (err != ESP_OK)
+        {
+            ESP_LOGE(TAG, "Falha ao definir modo WiFi: %s", esp_err_to_name(err));
+            return;
+        }
+
+        err = esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
+        if (err != ESP_OK)
+        {
+            ESP_LOGE(TAG, "Falha ao configurar WiFi: %s", esp_err_to_name(err));
+            return;
+        }
+
+        err = esp_wifi_start();
+        if (err != ESP_OK)
+        {
+            ESP_LOGE(TAG, "Falha ao iniciar WiFi: %s", esp_err_to_name(err));
+            return;
+        }
+
+        ESP_LOGI(TAG, "WiFi iniciado com sucesso. Aguardando conexão...");
+    }
+
+    // ---------------------------------------------------------------------
+    void Gateway::init(const std::string &server_url)
+    {
+        ESP_LOGI(TAG, "");
+        ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
+        ESP_LOGI(TAG, "INICIALIZANDO GATEWAY");
+        ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
+        
         // Liberar memória BT (não usamos)
         esp_err_t r = esp_bt_controller_mem_release(ESP_BT_MODE_BTDM);
         if (r == ESP_OK)
             ESP_LOGI(TAG, "Memoria BT liberada.");
         else
             ESP_LOGW(TAG, "BT ja liberado ou ativo.");
+
+        // Configurar URL do servidor (usa menuconfig se vazio)
+        if (!server_url.empty())
+        {
+            s_server_url = server_url;
+        }
+        else
+        {
+#ifdef CONFIG_WETZEL_GATEWAY_SERVER_URL
+            s_server_url = CONFIG_WETZEL_GATEWAY_SERVER_URL;
+#else
+            s_server_url = "http://192.168.1.100:8080"; // Fallback se constante não existir
+#endif
+        }
+        ESP_LOGI(TAG, "Server URL: %s", s_server_url.c_str());
+        ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
+
+        // Inicializa WiFi
+        init_wifi();
 
         // UART para comunicação com o nó-borda
         uart_config_t cfg{};
@@ -83,10 +408,30 @@ namespace WetzelMesh
         // RX pela UART (GW <- Nó)
         xTaskCreatePinnedToCore(uart_listen_task, "gw_uart_rx", 4096, nullptr, 5, nullptr, tskNO_AFFINITY);
 
+        // Task para processar requisições HTTP
+        xTaskCreatePinnedToCore(http_request_task, "gw_http", 8192, nullptr, 5, nullptr, tskNO_AFFINITY);
+
+        // Task para logar status UART periodicamente
+        xTaskCreatePinnedToCore(uart_status_task, "gw_uart_status", 2048, nullptr, 3, nullptr, tskNO_AFFINITY);
+
+        // Task para reconexão WiFi (não bloqueia handlers)
+        xTaskCreatePinnedToCore(wifi_reconnect_task, "wifi_reconnect", 2048, nullptr, 3, nullptr, tskNO_AFFINITY);
+
         // Gera tráfego de teste HELLO → valida caminho completo UART→MESH
         xTaskCreatePinnedToCore(test_packet_task, "gw_uart_tx_test", 4096, nullptr, 5, nullptr, tskNO_AFFINITY);
 
-        ESP_LOGI(TAG, "Gateway inicializado (UART TX=17 RX=16, BLE/BT off).");
+        ESP_LOGI(TAG, "Gateway inicializado (UART TX=17 RX=16, Server=%s).", s_server_url.c_str());
+    }
+    
+    void Gateway::set_server_url(const std::string &url)
+    {
+        s_server_url = url;
+        ESP_LOGI(TAG, "Server URL atualizado: %s", s_server_url.c_str());
+    }
+    
+    std::string Gateway::get_server_url()
+    {
+        return s_server_url;
     }
 
     void Gateway::uart_listen_task(void *)
@@ -134,6 +479,8 @@ namespace WetzelMesh
 
             ESP_LOGI(TAG, "RX[UART GW<-BORDER] from=%s dst=%s (%d bytes)",
                      pkt.route.src.c_str(), pkt.route.dst.c_str(), len);
+            LedManager::set_gateway_uart_connected(true); // Marca UART como conectada
+            ESP_LOGI(TAG, "UART: CONECTADO com border node");
             LedManager::blink(TrafficSource::UART);
 
             if (pkt.type == Protocol::PacketType::EVENT && pkt.method == "PING")
@@ -150,16 +497,273 @@ namespace WetzelMesh
                 continue;
             }
 
-            if (pkt.route.dst == "server")
+            // Processa TOKEN (modo teste) - token voltou do border node
+#ifdef CONFIG_WETZEL_TEST_MODE
+            if (pkt.type == Protocol::PacketType::EVENT && pkt.method == "TOKEN" && pkt.route.dst == "gateway")
             {
-                ESP_LOGI(TAG, "Encaminharia pacote ao servidor (stub).");
-                LedManager::blink(TrafficSource::SERVER);
+                ESP_LOGI(TAG, "TOKEN voltou ao Gateway de %s", pkt.route.src.c_str());
+                s_gateway_has_token = true;
+                // LED acende quando recebe token
+                LedManager::set_led_on_for_duration(CONFIG_WETZEL_TOKEN_HOLD_TIME_MS);
+                continue;
             }
+#endif
+
+            if (pkt.route.dst == "server" || pkt.type == Protocol::PacketType::REQUEST)
+            {
+                // Requisição HTTP - processa via cliente HTTP
+                ESP_LOGI(TAG, "Requisição HTTP recebida: %s %s", pkt.method.c_str(), pkt.endpoint.c_str());
+                send_http_request(pkt);
+            }
+        }
+    }
+
+    static void wifi_scan_task(void *)
+    {
+        // Aguarda mais tempo para garantir que WiFi não está mais tentando conectar
+        ESP_LOGI(TAG, "Aguardando WiFi estabilizar antes do scan...");
+        vTaskDelay(pdMS_TO_TICKS(5000));
+        
+        // Verifica se WiFi já está conectado
+        wifi_ap_record_t ap_info;
+        if (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK)
+        {
+            ESP_LOGI(TAG, "WiFi já conectado, pulando scan");
+            vTaskDelete(nullptr);
+            return;
+        }
+        
+        // Salva configuração WiFi atual antes de fazer scan
+        wifi_config_t saved_wifi_config = {};
+        esp_err_t config_err = esp_wifi_get_config(WIFI_IF_STA, &saved_wifi_config);
+        bool need_rebuild_config = (config_err != ESP_OK);
+        
+        if (need_rebuild_config)
+        {
+            ESP_LOGW(TAG, "Não foi possível obter configuração WiFi: %s, reconstruindo...", esp_err_to_name(config_err));
+            // Reconstrói configuração completa do menuconfig
+            memset(&saved_wifi_config, 0, sizeof(saved_wifi_config));
+            
+#ifdef CONFIG_WETZEL_GATEWAY_WIFI_SSID
+            const char* ssid = CONFIG_WETZEL_GATEWAY_WIFI_SSID;
+            size_t ssid_len = strlen(ssid);
+            if (ssid_len > 0 && ssid_len < sizeof(saved_wifi_config.sta.ssid))
+            {
+                memcpy(saved_wifi_config.sta.ssid, ssid, ssid_len);
+                saved_wifi_config.sta.ssid[ssid_len] = '\0';
+            }
+#endif
+#ifdef CONFIG_WETZEL_GATEWAY_WIFI_PASSWORD
+            const char* password = CONFIG_WETZEL_GATEWAY_WIFI_PASSWORD;
+            size_t pwd_len = strlen(password);
+            if (pwd_len > 0 && pwd_len < sizeof(saved_wifi_config.sta.password))
+            {
+                memcpy(saved_wifi_config.sta.password, password, pwd_len);
+                saved_wifi_config.sta.password[pwd_len] = '\0';
+                saved_wifi_config.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
+            }
+            else
+            {
+                saved_wifi_config.sta.threshold.authmode = WIFI_AUTH_OPEN;
+            }
+#else
+            saved_wifi_config.sta.threshold.authmode = WIFI_AUTH_OPEN;
+#endif
+            // Restaura todas as configurações padrão
+            saved_wifi_config.sta.pmf_cfg.capable = true;
+            saved_wifi_config.sta.pmf_cfg.required = false;
+            saved_wifi_config.sta.scan_method = WIFI_FAST_SCAN;
+            saved_wifi_config.sta.sort_method = WIFI_CONNECT_AP_BY_SIGNAL;
+            saved_wifi_config.sta.threshold.rssi = -127;
+            saved_wifi_config.sta.bssid_set = false;
+        }
+        
+        // Para o WiFi temporariamente para fazer scan sem conflitos
+        ESP_LOGI(TAG, "Parando WiFi temporariamente para fazer scan...");
+        esp_wifi_stop();
+        vTaskDelay(pdMS_TO_TICKS(500));
+        
+        // Reinicia WiFi em modo STA para fazer scan
+        esp_wifi_set_mode(WIFI_MODE_STA);
+        esp_wifi_start();
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        
+        // Mostra qual SSID está sendo procurado
+        const char* target_ssid = CONFIG_WETZEL_GATEWAY_WIFI_SSID;
+        ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
+        ESP_LOGI(TAG, "INICIANDO SCAN WIFI");
+        ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
+        ESP_LOGI(TAG, "Procurando pela rede: '%s'", target_ssid ? target_ssid : "(NULL)");
+        ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
+        
+        wifi_scan_config_t scan_config = {};
+        scan_config.ssid = NULL; // Scan todas as redes
+        scan_config.bssid = NULL;
+        scan_config.channel = 0; // Todos os canais
+        scan_config.show_hidden = false;
+        scan_config.scan_type = WIFI_SCAN_TYPE_ACTIVE;
+        scan_config.scan_time.active.min = 100;
+        scan_config.scan_time.active.max = 300;
+        
+        esp_err_t scan_err = esp_wifi_scan_start(&scan_config, true); // true = bloqueante
+        if (scan_err == ESP_OK)
+        {
+            uint16_t ap_count = 0;
+            esp_wifi_scan_get_ap_num(&ap_count);
+            ESP_LOGI(TAG, "Scan completo: %d redes encontradas", ap_count);
+            
+            if (ap_count > 0)
+            {
+                wifi_ap_record_t ap_records[20];
+                uint16_t ap_records_count = (ap_count > 20) ? 20 : ap_count;
+                esp_wifi_scan_get_ap_records(&ap_records_count, ap_records);
+                
+                ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
+                ESP_LOGI(TAG, "REDES DISPONÍVEIS:");
+                ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
+                bool found_target = false;
+                for (int i = 0; i < ap_records_count; i++)
+                {
+                    bool is_target = (target_ssid && strcmp((char*)ap_records[i].ssid, target_ssid) == 0);
+                    if (is_target) found_target = true;
+                    
+                    ESP_LOGI(TAG, "   [%d] SSID: '%s' %s, RSSI: %d dBm, Auth: %d", 
+                             i+1, ap_records[i].ssid, 
+                             is_target ? "(ESTA É A REDE CONFIGURADA!)" : "",
+                             ap_records[i].rssi, ap_records[i].authmode);
+                }
+                ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
+                
+                if (!found_target && target_ssid)
+                {
+                    ESP_LOGW(TAG, "ATENÇÃO: A rede '%s' NÃO foi encontrada no scan!", target_ssid);
+                    ESP_LOGW(TAG, "   Verifique se:");
+                    ESP_LOGW(TAG, "   1. O SSID está correto no menuconfig");
+                    ESP_LOGW(TAG, "   2. A rede está no alcance");
+                    ESP_LOGW(TAG, "   3. A rede não está oculta (hidden)");
+                }
+            }
+            else
+            {
+                ESP_LOGW(TAG, "Nenhuma rede encontrada no scan!");
+            }
+        }
+        else
+        {
+            ESP_LOGW(TAG, "Falha no scan: %s", esp_err_to_name(scan_err));
+        }
+        
+        // Reconecta WiFi após scan com configuração salva
+        ESP_LOGI(TAG, "Reiniciando WiFi para tentar conexão novamente...");
+        esp_wifi_stop();
+        vTaskDelay(pdMS_TO_TICKS(500));
+        
+        // Restaura configuração WiFi original
+        esp_wifi_set_mode(WIFI_MODE_STA);
+        esp_err_t set_config_err = esp_wifi_set_config(WIFI_IF_STA, &saved_wifi_config);
+        if (set_config_err != ESP_OK)
+        {
+            ESP_LOGE(TAG, "Falha ao restaurar configuração WiFi: %s", esp_err_to_name(set_config_err));
+        }
+        esp_wifi_start();
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        esp_wifi_connect();
+        
+        vTaskDelete(nullptr); // Task única, se deleta após completar
+    }
+
+    static void wifi_reconnect_task(void *)
+    {
+        for (;;)
+        {
+            if (s_wifi_should_reconnect)
+            {
+                s_wifi_should_reconnect = false;
+                vTaskDelay(pdMS_TO_TICKS(2000)); // Aguarda 2 segundos antes de reconectar
+                ESP_LOGI(TAG, "Tentando reconectar WiFi...");
+                esp_wifi_connect();
+            }
+            vTaskDelay(pdMS_TO_TICKS(500)); // Verifica a cada 500ms
+        }
+    }
+
+    static void uart_status_task(void *)
+    {
+        bool last_uart_status = false;
+        for (;;)
+        {
+            bool current_uart_status = LedManager::get_gateway_uart_connected();
+            if (current_uart_status != last_uart_status)
+            {
+                if (current_uart_status)
+                {
+                    ESP_LOGI(TAG, "UART: CONECTADO com border node");
+                }
+                else
+                {
+                    ESP_LOGW(TAG, "UART: DESCONECTADO - aguardando border node...");
+                }
+                last_uart_status = current_uart_status;
+            }
+            vTaskDelay(pdMS_TO_TICKS(5000)); // Verifica a cada 5 segundos
         }
     }
 
     static void test_packet_task(void *)
     {
+#ifdef CONFIG_WETZEL_TEST_MODE
+        // Modo TESTE: Gateway inicia token passing
+        ESP_LOGI(TAG, "Modo TESTE: Gateway aguardando UART conectar para iniciar token...");
+        vTaskDelay(pdMS_TO_TICKS(7000)); // Aguarda rede estabilizar
+        
+        // Aguarda UART conectar antes de iniciar token
+        while (!LedManager::get_gateway_uart_connected())
+        {
+            ESP_LOGW(TAG, "Aguardando UART conectar...");
+            vTaskDelay(pdMS_TO_TICKS(1000));
+        }
+        
+        // UART conectada, inicia token
+        ESP_LOGI(TAG, "Gateway iniciando token passing (UART conectada)");
+        s_gateway_has_token = true;
+        
+        for (;;)
+        {
+            // Se tem token, mantém por tempo configurado e depois passa
+            if (s_gateway_has_token)
+            {
+                uint32_t hold_time = CONFIG_WETZEL_TOKEN_HOLD_TIME_MS;
+                ESP_LOGI(TAG, "Gateway tem TOKEN - mantendo por %u ms", hold_time);
+                vTaskDelay(pdMS_TO_TICKS(hold_time));
+                
+                // Passa token para border node via UART
+                Protocol::Packet token{};
+                token.type = Protocol::PacketType::EVENT;
+                token.method = "TOKEN";
+                token.route.src = "gateway";
+                token.route.dst = "border"; // Border node recebe e passa adiante
+                token.body = R"({"type":"token","from":"gateway"})";
+                
+                ESP_LOGI(TAG, "Gateway passando TOKEN para border node via UART");
+                if (Gateway::send(token))
+                {
+                    s_gateway_has_token = false;
+                    ESP_LOGI(TAG, "Token enviado via UART");
+                }
+                else
+                {
+                    ESP_LOGW(TAG, "Falha ao enviar token via UART - UART não conectada");
+                }
+            }
+            else
+            {
+                // Se não tem token e UART não está conectada, não faz nada
+                // Se não tem token mas UART está conectada, aguarda token voltar
+                vTaskDelay(pdMS_TO_TICKS(100));
+            }
+        }
+#else
+        // Modo REAL: Gateway envia HELLO periodicamente
         for (;;)
         {
             Protocol::Packet pkt{};
@@ -174,6 +778,7 @@ namespace WetzelMesh
 
             vTaskDelay(pdMS_TO_TICKS(1000)); // a cada 1 s
         }
+#endif
     }
 
     // ---------------------------------------------------------------------
@@ -189,6 +794,198 @@ namespace WetzelMesh
     bool Gateway::send_to_border(const Protocol::Packet &pkt)
     {
         return send(pkt);
+    }
+    
+    // Estrutura para passar dados para o callback HTTP
+    struct HttpCallbackData
+    {
+        std::string request_id;
+        std::string response_body;
+    };
+    
+    // Callback do cliente HTTP para receber resposta
+    static esp_err_t http_event_handler(esp_http_client_event_t *evt)
+    {
+        HttpCallbackData *data = static_cast<HttpCallbackData *>(evt->user_data);
+        if (!data)
+            return ESP_FAIL;
+        
+        switch (evt->event_id)
+        {
+        case HTTP_EVENT_ERROR:
+            ESP_LOGE(TAG, "HTTP_EVENT_ERROR");
+            break;
+        case HTTP_EVENT_ON_CONNECTED:
+            ESP_LOGI(TAG, "HTTP_EVENT_ON_CONNECTED");
+            data->response_body.clear();
+            break;
+        case HTTP_EVENT_HEADER_SENT:
+            ESP_LOGI(TAG, "HTTP_EVENT_HEADER_SENT");
+            break;
+        case HTTP_EVENT_ON_HEADER:
+            ESP_LOGI(TAG, "HTTP_EVENT_ON_HEADER, key=%s, value=%s", evt->header_key, evt->header_value);
+            break;
+        case HTTP_EVENT_ON_DATA:
+            if (!esp_http_client_is_chunked_response(evt->client))
+            {
+                data->response_body.append((char *)evt->data, evt->data_len);
+            }
+            break;
+        case HTTP_EVENT_ON_FINISH:
+            ESP_LOGI(TAG, "HTTP_EVENT_ON_FINISH");
+            {
+                // Recupera contexto
+                auto ctx = HttpContextManager::instance().get_context(data->request_id);
+                if (ctx)
+                {
+                    int status_code = esp_http_client_get_status_code(evt->client);
+                    
+                    // Cria resposta
+                    Protocol::Packet response;
+                    response.type = Protocol::PacketType::RESPONSE;
+                    response.route.src = "gateway";
+                    response.route.dst = ctx->original_src;
+                    response.status = status_code;
+                    response.body = data->response_body;
+                    response.request_id = data->request_id;
+                    
+                    ESP_LOGI(TAG, "Resposta HTTP: status=%d body_size=%u", status_code, (unsigned)data->response_body.size());
+                    
+                    // Se resposta é muito grande, particiona em chunks
+                    if (data->response_body.size() > kMaxChunkSize)
+                    {
+                        auto chunks = Protocol::create_chunks(response, kMaxChunkSize);
+                        ESP_LOGI(TAG, "Resposta grande, dividindo em %u chunks", (unsigned)chunks.size());
+                        
+                        for (const auto &chunk : chunks)
+                        {
+                            Gateway::send_to_border(chunk);
+                            vTaskDelay(pdMS_TO_TICKS(10)); // Pequeno delay entre chunks
+                        }
+                    }
+                    else
+                    {
+                        Gateway::send_to_border(response);
+                    }
+                    
+                    // Remove contexto
+                    HttpContextManager::instance().remove_context(data->request_id);
+                }
+            }
+            data->response_body.clear();
+            // Limpa callback_data após processar resposta
+            delete data;
+            break;
+        case HTTP_EVENT_DISCONNECTED:
+            ESP_LOGI(TAG, "HTTP_EVENT_DISCONNECTED");
+            // Em caso de desconexão antes de FINISH, limpa dados
+            if (data)
+            {
+                delete data;
+            }
+            break;
+        default:
+            break;
+        }
+        return ESP_OK;
+    }
+    
+    bool Gateway::send_http_request(const Protocol::Packet &request_pkt)
+    {
+        // Cria contexto
+        std::string request_id = HttpContextManager::instance().create_context(request_pkt, s_server_url);
+        
+        // Constrói URL completa
+        std::string full_url = s_server_url + request_pkt.endpoint;
+        
+        ESP_LOGI(TAG, "Enviando requisição HTTP: %s %s", request_pkt.method.c_str(), full_url.c_str());
+        
+        // Cria estrutura de dados para callback (alocada dinamicamente)
+        // Nota: O callback HTTP pode ser assíncrono, então mantemos o ponteiro
+        // até que o callback seja chamado. O cleanup será feito no callback.
+        HttpCallbackData *callback_data = new HttpCallbackData();
+        callback_data->request_id = request_id;
+        callback_data->response_body.clear();
+        
+        esp_http_client_config_t config = {};
+        config.url = full_url.c_str();
+        config.event_handler = http_event_handler;
+        config.user_data = callback_data;
+        config.timeout_ms = 30000; // 30 segundos
+        
+        esp_http_client_handle_t client = esp_http_client_init(&config);
+        if (!client)
+        {
+            ESP_LOGE(TAG, "Falha ao inicializar cliente HTTP");
+            delete callback_data;
+            HttpContextManager::instance().remove_context(request_id);
+            return false;
+        }
+        
+        // Configura método HTTP
+        esp_http_client_set_method(client, 
+            (request_pkt.method == "POST") ? HTTP_METHOD_POST :
+            (request_pkt.method == "PUT") ? HTTP_METHOD_PUT :
+            (request_pkt.method == "DELETE") ? HTTP_METHOD_DELETE :
+            HTTP_METHOD_GET);
+        
+        // Adiciona headers
+        esp_http_client_set_header(client, "Content-Type", "application/json");
+        esp_http_client_set_header(client, "X-Request-ID", request_id.c_str());
+        esp_http_client_set_header(client, "X-Original-Src", request_pkt.route.src.c_str());
+        
+        // Se tem body, adiciona
+        if (!request_pkt.body.empty())
+        {
+            esp_http_client_set_post_field(client, request_pkt.body.c_str(), request_pkt.body.length());
+        }
+        
+        // Executa requisição
+        esp_err_t err = esp_http_client_perform(client);
+        if (err == ESP_OK)
+        {
+            ESP_LOGI(TAG, "HTTP Status = %d, content_length = %lld",
+                     esp_http_client_get_status_code(client),
+                     esp_http_client_get_content_length(client));
+        }
+        else
+        {
+            ESP_LOGE(TAG, "Erro ao executar requisição HTTP: %s", esp_err_to_name(err));
+            
+            // Envia resposta de erro
+            Protocol::Packet error_response;
+            error_response.type = Protocol::PacketType::RESPONSE;
+            error_response.route.src = "gateway";
+            error_response.route.dst = request_pkt.route.src;
+            error_response.status = 500;
+            error_response.body = R"({"error":"HTTP request failed"})";
+            error_response.request_id = request_id;
+            send_to_border(error_response);
+            
+            HttpContextManager::instance().remove_context(request_id);
+        }
+        
+        esp_http_client_cleanup(client);
+        
+        // Nota: callback_data será deletado no callback HTTP_EVENT_ON_FINISH
+        // Se houver erro antes do callback, deleta aqui
+        if (err != ESP_OK && callback_data)
+        {
+            delete callback_data;
+        }
+        
+        LedManager::blink(TrafficSource::SERVER);
+        return (err == ESP_OK);
+    }
+    
+    void Gateway::http_request_task(void *)
+    {
+        // Task para limpar contextos antigos periodicamente
+        for (;;)
+        {
+            vTaskDelay(pdMS_TO_TICKS(60000)); // A cada 1 minuto
+            HttpContextManager::instance().cleanup_old_contexts(300000); // 5 minutos
+        }
     }
 
 } // namespace WetzelMesh

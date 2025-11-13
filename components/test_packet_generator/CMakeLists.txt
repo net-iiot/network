@@ -10,5 +10,6 @@ idf_component_register(
         protocol
         network_manager
         led_manager
+        border_uart
 )
 set_target_properties(${COMPONENT_LIB} PROPERTIES CXX_STANDARD 17)

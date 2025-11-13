@@ -8,10 +8,19 @@ namespace WetzelMesh
     class Gateway
     {
     public:
-        static void init();
+        static void init(const std::string &server_url = "");
         static void uart_listen_task(void *);
         static bool send(const Protocol::Packet &pkt);
         static bool send_to_border(const Protocol::Packet &pkt);
-        static bool uart_write_json(const std::string &json); // ✅ agora pública
+        static bool uart_write_json(const std::string &json);
+        
+        // Cliente HTTP
+        static bool send_http_request(const Protocol::Packet &request_pkt);
+        static void set_server_url(const std::string &url);
+        static std::string get_server_url();
+        
+    private:
+        static std::string s_server_url;
+        static void http_request_task(void *);
     };
 } // namespace WetzelMesh

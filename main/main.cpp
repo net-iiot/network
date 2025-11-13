@@ -4,6 +4,7 @@
 #include "nvs_flash.h"
 #include "esp_event.h"
 #include "esp_netif.h"
+#include <cstring>
 
 #include "led_manager.hpp"
 #include "protocol.hpp"
@@ -25,14 +26,47 @@ extern "C" void app_main(void)
     constexpr bool kIsGateway = false;
 #endif
 
+    // Configura níveis de log ANTES de qualquer log
     esp_log_level_set("*", ESP_LOG_WARN);
     esp_log_level_set("WETZELMESH", ESP_LOG_INFO);
     esp_log_level_set("GATEWAY", ESP_LOG_INFO);
     esp_log_level_set("BORDER_UART", ESP_LOG_INFO);
     esp_log_level_set("NETMAN", ESP_LOG_INFO);
     esp_log_level_set("ESPNOW", ESP_LOG_INFO);
+    
+    // Pequeno delay para garantir que o monitor está pronto
+    vTaskDelay(pdMS_TO_TICKS(100));
 
-    ESP_LOGI(TAG, "Iniciando WetzelMesh (%s)", kIsGateway ? "Gateway" : "Node");
+    ESP_LOGI(TAG, "");
+    ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
+    ESP_LOGI(TAG, "INICIANDO WETZEL MESH");
+    ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
+    ESP_LOGI(TAG, "Modo: %s", kIsGateway ? "Gateway" : "Node");
+    
+    // Mostra configurações do menuconfig (se Gateway)
+    if (kIsGateway)
+    {
+        ESP_LOGI(TAG, "");
+        ESP_LOGI(TAG, "CONFIGURAÇÕES DO MENUCONFIG (Gateway):");
+#ifdef CONFIG_WETZEL_GATEWAY_WIFI_SSID
+        ESP_LOGI(TAG, "   WiFi SSID: '%s'", CONFIG_WETZEL_GATEWAY_WIFI_SSID);
+#else
+        ESP_LOGW(TAG, "   WiFi SSID: NÃO CONFIGURADO!");
+#endif
+#ifdef CONFIG_WETZEL_GATEWAY_WIFI_PASSWORD
+        const char* pwd = CONFIG_WETZEL_GATEWAY_WIFI_PASSWORD;
+        ESP_LOGI(TAG, "   WiFi Password: %s", 
+                 (pwd && strlen(pwd) > 0) ? "*** (configurada)" : "(vazia - rede aberta)");
+#else
+        ESP_LOGW(TAG, "   WiFi Password: NÃO CONFIGURADO!");
+#endif
+#ifdef CONFIG_WETZEL_GATEWAY_SERVER_URL
+        ESP_LOGI(TAG, "   Server URL: '%s'", CONFIG_WETZEL_GATEWAY_SERVER_URL);
+#else
+        ESP_LOGW(TAG, "   Server URL: NÃO CONFIGURADO!");
+#endif
+        ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
+    }
 
     // NVS
     esp_err_t ret = nvs_flash_init();
@@ -52,6 +86,17 @@ extern "C" void app_main(void)
     ESP_LOGI(TAG, "LED Manager inicializado");
 
     Router::init(kIsGateway);
+    
+    // Inicializa Gateway com URL do servidor (se gateway)
+    if (kIsGateway)
+    {
+#ifdef CONFIG_WETZEL_GATEWAY_SERVER_URL
+        Gateway::init(CONFIG_WETZEL_GATEWAY_SERVER_URL);
+#else
+        Gateway::init("http://192.168.1.100:8080"); // Fallback se constante não existir
+#endif
+    }
+    
     NetworkManager::init(kIsGateway); // se gateway: BLE/ESPNOW OFF, só Gateway::init()
 
     // Geração de pacotes de teste a cada 1s (mantive seu nome de função)

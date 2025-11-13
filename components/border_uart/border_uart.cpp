@@ -75,37 +75,48 @@ namespace WetzelMesh
     // ---------------------------------------------------------------------
     bool BorderUart::do_handshake(unsigned timeout_ms)
     {
-        Protocol::Packet ping{};
-        ping.type = Protocol::PacketType::EVENT;
-        ping.method = "PING";
-        ping.route.src = "border";
-        ping.route.dst = "gateway";
-        ping.body = "{}";
-
-        std::string json = Protocol::serialize(ping);
-        BorderUart::uart_write_json(json);
-
-        std::string acc;
-        acc.reserve(16);
-
-        auto read_line = [&]() -> std::string
+        constexpr int kMaxRetries = 3;
+        constexpr unsigned kRetryDelayMs = 500;
+        
+        for (int retry = 0; retry < kMaxRetries; retry++)
         {
-            acc.clear();
-            const TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(timeout_ms);
-            while (xTaskGetTickCount() < deadline)
+            if (retry > 0)
             {
-                uint8_t ch;
-                int r = uart_read_bytes(kUartNum, &ch, 1, pdMS_TO_TICKS(20));
-                if (r == 1)
-                {
-                    if (ch == '\n')
-                        break;
-                    if (acc.size() < 12)
-                        acc.push_back((char)ch);
-                }
+                ESP_LOGW(TAG, "Handshake retry %d/%d", retry, kMaxRetries);
+                vTaskDelay(pdMS_TO_TICKS(kRetryDelayMs));
             }
-            return acc;
-        };
+            
+            Protocol::Packet ping{};
+            ping.type = Protocol::PacketType::EVENT;
+            ping.method = "PING";
+            ping.route.src = "border";
+            ping.route.dst = "gateway";
+            ping.body = "{}";
+
+            std::string json = Protocol::serialize(ping);
+            BorderUart::uart_write_json(json);
+
+            std::string acc;
+            acc.reserve(16);
+
+            auto read_line = [&]() -> std::string
+            {
+                acc.clear();
+                const TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(timeout_ms);
+                while (xTaskGetTickCount() < deadline)
+                {
+                    uint8_t ch;
+                    int r = uart_read_bytes(kUartNum, &ch, 1, pdMS_TO_TICKS(20));
+                    if (r == 1)
+                    {
+                        if (ch == '\n')
+                            break;
+                        if (acc.size() < 12)
+                            acc.push_back((char)ch);
+                    }
+                }
+                return acc;
+            };
 
         const TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(timeout_ms);
         while (xTaskGetTickCount() < deadline)
@@ -137,6 +148,12 @@ namespace WetzelMesh
                 return true;
             }
         }
+        
+        // Se chegou aqui, timeout sem receber PONG
+        ESP_LOGW(TAG, "Handshake timeout (tentativa %d/%d)", retry + 1, kMaxRetries);
+        }
+        
+        ESP_LOGE(TAG, "Handshake falhou após %d tentativas", kMaxRetries);
         return false;
     }
 
@@ -193,6 +210,22 @@ namespace WetzelMesh
             ESP_LOGI(TAG, "RX[UART BORDER<-GW] from=%s dst=%s (%d bytes)",
                      pkt.route.src.c_str(), pkt.route.dst.c_str(), len);
             LedManager::blink(TrafficSource::UART);
+
+            // Processa TOKEN (modo teste) - token do gateway via UART
+#ifdef CONFIG_WETZEL_TEST_MODE
+            if (pkt.type == Protocol::PacketType::EVENT && pkt.method == "TOKEN")
+            {
+                // Token do gateway - passa para a mesh
+                if (pkt.route.dst == "border" || pkt.route.dst.empty())
+                {
+                    // Se não tem destino específico, passa para primeiro vizinho ou processa localmente
+                    ESP_LOGI(TAG, "TOKEN recebido do Gateway via UART - processando...");
+                    if (s_rx_handler)
+                        s_rx_handler(pkt);
+                    return;
+                }
+            }
+#endif
 
             // Reencaminha para a malha usando SEU módulo real:
             if (pkt.method == "HELLO")

@@ -6,13 +6,14 @@
 namespace WetzelMesh
 {
     static gpio_num_t kLedTraffic = GPIO_NUM_25; // LED primário: GW=ServerStatus, NODE=MeshStatus
-    static gpio_num_t kLedNodeA = GPIO_NUM_26;   // LED secundário: NODE=UART Status
+    static gpio_num_t kLedNodeA = GPIO_NUM_26;   // LED secundário: GW=UART Status, NODE=UART Status
     // kLedNodeB removido para focar em 25 e 26
 
     static bool s_isGateway = false;
     static bool s_nodeJoined = false;
     static bool s_gatewayConnected = false;
-    static bool s_nodeUartEnabled = false; // Novo estado para UART no Node
+    static bool s_nodeUartEnabled = false; // Estado para UART no Node
+    static bool s_gatewayUartConnected = false; // Estado para UART no Gateway
 
     static inline void set_level(gpio_num_t pin, int on)
     {
@@ -28,8 +29,9 @@ namespace WetzelMesh
             // ON se NÃO conectado; OFF se conectado. Se passar dados, pisca (tratado em blink)
             set_level(kLedTraffic, s_gatewayConnected ? 0 : 1);
 
-            // Pin 26 (kLedNodeA) -> Não utilizado no modo Gateway.
-            set_level(kLedNodeA, 0);
+            // Pin 26 (kLedNodeA) -> UART Border Connection
+            // ON se UART NÃO está conectada; OFF se UART está conectada
+            set_level(kLedNodeA, s_gatewayUartConnected ? 0 : 1);
         }
         else
         {
@@ -61,6 +63,7 @@ namespace WetzelMesh
         s_nodeJoined = false;
         s_gatewayConnected = false;
         s_nodeUartEnabled = false;
+        s_gatewayUartConnected = false;
         refresh_leds();
     }
 
@@ -70,8 +73,17 @@ namespace WetzelMesh
 
         if (s_isGateway)
         {
-            // Gateway: Todo o tráfego pisca no LED 25 (kLedTraffic)
-            led_to_blink = kLedTraffic;
+            // Gateway:
+            // Server/MESH pisca no LED 25 (kLedTraffic)
+            if (source == TrafficSource::SERVER || source == TrafficSource::MESH)
+            {
+                led_to_blink = kLedTraffic;
+            }
+            // UART pisca no LED 26 (kLedNodeA)
+            else if (source == TrafficSource::UART)
+            {
+                led_to_blink = kLedNodeA;
+            }
         }
         else
         {
@@ -116,5 +128,35 @@ namespace WetzelMesh
     {
         s_nodeUartEnabled = enabled;
         refresh_leds();
+    }
+
+    void LedManager::set_gateway_uart_connected(bool connected)
+    {
+        s_gatewayUartConnected = connected;
+        refresh_leds();
+    }
+
+    bool LedManager::get_gateway_uart_connected()
+    {
+        return s_gatewayUartConnected;
+    }
+
+    void LedManager::set_led_on_for_duration(uint32_t duration_ms)
+    {
+        // Liga o LED principal (GPIO 25) - sobrescreve estado normal
+        set_level(kLedTraffic, 1);
+        
+        // Cria task que desliga após duration_ms
+        auto led_task = [](void *param) {
+            uint32_t duration = *(uint32_t *)param;
+            delete (uint32_t *)param; // Libera memória imediatamente
+            vTaskDelay(pdMS_TO_TICKS(duration));
+            set_level(kLedTraffic, 0);
+            refresh_leds(); // Restaura estado normal do LED
+            vTaskDelete(nullptr);
+        };
+        
+        uint32_t *duration_ptr = new uint32_t(duration_ms);
+        xTaskCreatePinnedToCore(led_task, "led_timer", 2048, duration_ptr, 3, nullptr, tskNO_AFFINITY);
     }
 }

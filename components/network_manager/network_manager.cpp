@@ -9,6 +9,8 @@
 #include "espnow_transport.hpp"
 #include "esp_timer.h"
 #include "border_uart.hpp"
+#include "chunk_manager.hpp"
+#include "test_packet_generator.hpp"
 
 using namespace WetzelMesh;
 
@@ -25,7 +27,7 @@ void NetworkManager::init(bool isGateway)
 
     if (s_gateway)
     {
-        Gateway::init(); // somente UART+server
+        // Gateway já foi inicializado no main.cpp com configurações WiFi
         ESP_LOGI(TAG, "INIT: GATEWAY (mesh/BLE OFF)");
     }
     else
@@ -115,7 +117,79 @@ void NetworkManager::handle_incoming(const Protocol::Packet &packet)
 
     // Node
     if (packet.type == Protocol::PacketType::EVENT && packet.method == "HELLO")
+    {
+        // Processa topologia recebida (para visualização futura)
+        if (!packet.topology.node_id.empty())
+        {
+            ESP_LOGI(TAG, "Topologia recebida de %s: %u vizinhos", 
+                     packet.topology.node_id.c_str(), 
+                     (unsigned)packet.topology.neighbors.size());
+        }
         return;
+    }
+    
+    // Processa TOKEN (modo teste)
+#ifdef CONFIG_WETZEL_TEST_MODE
+    if (packet.type == Protocol::PacketType::EVENT && packet.method == "TOKEN")
+    {
+        std::string my_id = BLETransport::node_id();
+        
+        // Se o token é para este node ou para "border" (vindo do gateway via UART)
+        if (packet.route.dst == my_id || packet.route.dst == "border")
+        {
+            // Se destino é "border" e este é o border node, processa localmente
+            if (packet.route.dst == "border")
+            {
+                ESP_LOGI(TAG, "TOKEN recebido do Gateway via UART: %s -> border (este node)", packet.route.src.c_str());
+                // Ajusta origem para "gateway" para o test_packet_generator saber que veio do gateway
+                Protocol::Packet adjusted_packet = packet;
+                adjusted_packet.route.dst = my_id; // Ajusta destino para este node
+                on_token_received(adjusted_packet);
+                return;
+            }
+            else
+            {
+                ESP_LOGI(TAG, "TOKEN recebido: %s -> %s (este node)", packet.route.src.c_str(), packet.route.dst.c_str());
+                // Notifica o test_packet_generator
+                on_token_received(packet);
+                return;
+            }
+        }
+        // Se é broadcast, qualquer node pode receber (mas só processa se não tiver token)
+        else if (packet.route.dst == "broadcast")
+        {
+            ESP_LOGI(TAG, "TOKEN broadcast recebido de %s", packet.route.src.c_str());
+            on_token_received(packet);
+            return;
+        }
+        // Se não é para este node, reencaminha pela mesh
+        else
+        {
+            ESP_LOGI(TAG, "TOKEN não é para este node (%s), reencaminhando para %s", 
+                     my_id.c_str(), packet.route.dst.c_str());
+            ESPNOWTransport::send(packet);
+            return;
+        }
+    }
+#endif
+    
+    // Processa chunks - se for chunk, tenta reconstruir
+    if (packet.is_chunk)
+    {
+        ESP_LOGI(TAG, "Chunk recebido: %u/%u (id=%u)", 
+                 packet.chunk_index + 1, packet.chunk_total, packet.chunk_id);
+        
+        Protocol::Packet reconstructed;
+        if (ChunkManager::instance().add_chunk(packet, reconstructed))
+        {
+            // Mensagem completa reconstruída, processa normalmente
+            ESP_LOGI(TAG, "Mensagem reconstruída de chunks, processando...");
+            handle_incoming(reconstructed); // Processa a mensagem completa
+            return;
+        }
+        // Ainda faltam chunks, apenas aguarda
+        return;
+    }
 
     if (packet.route.dst == "gateway")
     {
@@ -149,8 +223,28 @@ void NetworkManager::start_hello_task()
             hello.route.src = BLETransport::node_id();
             hello.route.dst = "broadcast";
             hello.body = R"({"t":"hello"})";
+            
+            // Adiciona informações de topologia
+            hello.topology.node_id = BLETransport::node_id();
+            hello.topology.has_gateway = BorderUart::is_enabled();
+            if (hello.topology.has_gateway)
+            {
+                hello.topology.gateway_id = "gateway";
+            }
+            
+            // Adiciona lista de vizinhos
+            const auto &neighbors = NetworkManager::neighbors();
+            for (const auto &nbr : neighbors)
+            {
+                Protocol::NeighborInfo nbr_info;
+                nbr_info.node_id = nbr.id;
+                nbr_info.rssi = nbr.rssi;
+                nbr_info.last_seen_ms = nbr.last_seen_ms;
+                hello.topology.neighbors.push_back(nbr_info);
+            }
 
-            ESP_LOGI(TAG, "TX[HELLO] %s -> broadcast", hello.route.src.c_str());
+            ESP_LOGI(TAG, "TX[HELLO] %s -> broadcast (vizinhos=%u)", 
+                     hello.route.src.c_str(), (unsigned)hello.topology.neighbors.size());
             // blink no hello será tratado dentro do ESPNOWTransport::send(hello);
             ESPNOWTransport::send(hello);
             vTaskDelay(pdMS_TO_TICKS(2000));

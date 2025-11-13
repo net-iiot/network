@@ -7,18 +7,18 @@ choice WM_DEVICE_ROLE
       Selecione o papel do firmware que você está compilando.
 
 config WM_ROLE_GATEWAY
-    bool "Gateway (Wi-Fi/AP + UART ↔ Border; BLE/ESPNOW OFF)"
+    bool "Gateway"
     help
       Compila/roda como GATEWAY:
       - BLE e ESPNOW desativados;
       - Apenas UART com o nó-borda e caminho ao servidor.
 
 config WM_ROLE_NODE
-    bool "Node Único (Mesh ESPNOW + UART opcional; BLE opcional)"
+    bool "Node"
     help
       Compila/roda como NODE:
       - Mesh ESPNOW ativa;
-      - UART opcional: vira “borda” se fizer handshake com o gateway;
+      - UART opcional: vira "borda" se fizer handshake com o gateway;
       - BLE pode ser ligado/desligado pelo switch abaixo.
 endchoice
 
@@ -34,5 +34,71 @@ config WETZEL_ENABLE_BLE
     help
       Ativa o transporte BLE nos nós (advertising/scan/GATT conforme BLETransport).
       Desligar reduz consumo/ruído de logs. A malha via ESPNOW continua funcionando.
+
+menu "Modo de Operação"
+    help
+      Configure o modo de operação do sistema (TESTE ou REAL).
+
+choice WM_OPERATION_MODE
+    prompt "Tipo de Modo"
+    default WM_MODE_REAL
+    help
+      Selecione se o sistema roda em modo TESTE (token passing) ou REAL (produção).
+
+config WM_MODE_TEST
+    bool "Modo TESTE (Token Passing)"
+    help
+      Modo de teste onde um token circula pela rede.
+      Cada node mantém o token por um tempo configurável antes de passar adiante.
+
+config WM_MODE_REAL
+    bool "Modo REAL (Produção)"
+    help
+      Modo de produção normal com comunicação real de dados.
+endchoice
+
+config WETZEL_TEST_MODE
+    bool
+    default y if WM_MODE_TEST
+    default n if WM_MODE_REAL
+
+config WETZEL_TOKEN_HOLD_TIME_MS
+    int "Tempo que token fica em cada node (ms)"
+    depends on WM_MODE_TEST
+    default 5000
+    range 100 10000
+    help
+      Tempo em milissegundos que cada node mantém o token antes de passar para o próximo.
+      Durante este tempo, o LED do node fica aceso.
+
+endmenu
+
+menu "Credenciais de Rede"
+    depends on WM_ROLE_GATEWAY
+    help
+      Configure as credenciais de rede para o Gateway (WiFi e servidor).
+
+config WETZEL_GATEWAY_WIFI_SSID
+    string "SSID da Rede WiFi"
+    default "industria40"
+    help
+      Nome da rede WiFi que o gateway irá conectar.
+      Configure o nome exato da sua rede WiFi aqui.
+
+config WETZEL_GATEWAY_WIFI_PASSWORD
+    string "Senha da Rede WiFi"
+    default "wetzel40"
+    help
+      Senha da rede WiFi. Deixe vazio para rede aberta.
+      Configure a senha da sua rede WiFi aqui.
+
+config WETZEL_GATEWAY_SERVER_URL
+    string "URL do Servidor HTTP"
+    default "http://172.16.10.110:80"
+    help
+      URL completa do servidor HTTP (ex: http://172.16.10.110:80).
+      Configure a URL do servidor que receberá as requisições HTTP.
+
+endmenu
 
 endmenu

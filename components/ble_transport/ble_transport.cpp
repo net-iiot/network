@@ -29,7 +29,6 @@ static const uint8_t TX_CHAR_UUID[16] = {0x57, 0x4D, 0x00, 0x03, 0xAA, 0xBB, 0xC
 // Handles / flags
 // -----------------------------------------------------------------------------
 static uint16_t g_tx_handle = 0; // notificação
-static uint16_t g_rx_handle = 0; // escrita
 static esp_gatt_if_t g_gatts_if = ESP_GATT_IF_NONE;
 bool BLETransport::s_isGateway = false;
 
@@ -150,13 +149,13 @@ static void gatts_event_handler(esp_gatts_cb_event_t event,
         break;
 
     case ESP_GATTS_CONNECT_EVT:
-        ESP_LOGI(TAG, "📡 BLE conectado: conn_id=%d", param->connect.conn_id);
+        ESP_LOGI(TAG, "BLE conectado: conn_id=%d", param->connect.conn_id);
         if (!BLETransport::isGateway())
             LedManager::set_node_joined(true);
         break;
 
     case ESP_GATTS_DISCONNECT_EVT:
-        ESP_LOGW(TAG, "⚠️ BLE desconectado: conn_id=%d", param->disconnect.conn_id);
+        ESP_LOGW(TAG, "BLE desconectado: conn_id=%d", param->disconnect.conn_id);
         if (!BLETransport::isGateway())
             LedManager::set_node_joined(false);
         s_advertising = false;
@@ -171,7 +170,7 @@ static void gatts_event_handler(esp_gatts_cb_event_t event,
             Protocol::Packet packet;
             if (Protocol::parse(json, packet))
             {
-                ESP_LOGI(TAG, "📩 BLE pacote RX: %s -> %s",
+                ESP_LOGI(TAG, "BLE pacote RX: %s -> %s",
                          packet.route.src.c_str(), packet.route.dst.c_str());
                 LedManager::blink(TrafficSource::MESH); // ATUALIZADO (tráfego Mesh/BLE)
                 NetworkManager::handle_incoming(packet);
@@ -289,7 +288,7 @@ void BLETransport::notify_tx(const std::string &data)
 bool BLETransport::send(const Protocol::Packet &packet)
 {
     std::string json = Protocol::serialize(packet);
-    ESP_LOGI(TAG, "📤 Enviando via BLE (notify): %s", json.c_str());
+    ESP_LOGI(TAG, "Enviando via BLE (notify): %s", json.c_str());
     notify_tx(json);
     return true;
 }
