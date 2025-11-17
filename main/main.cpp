@@ -90,11 +90,14 @@ extern "C" void app_main(void)
     // Inicializa Gateway com URL do servidor (se gateway)
     if (kIsGateway)
     {
+        ESP_LOGI(TAG, "");
+        ESP_LOGI(TAG, "Chamando Gateway::init()...");
 #ifdef CONFIG_WETZEL_GATEWAY_SERVER_URL
         Gateway::init(CONFIG_WETZEL_GATEWAY_SERVER_URL);
 #else
         Gateway::init("http://192.168.1.100:8080"); // Fallback se constante não existir
 #endif
+        ESP_LOGI(TAG, "Gateway::init() concluído!");
     }
     
     NetworkManager::init(kIsGateway); // se gateway: BLE/ESPNOW OFF, só Gateway::init()

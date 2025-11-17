@@ -26,6 +26,16 @@ namespace WetzelMesh
 
     bool BorderUart::init()
     {
+        ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
+        ESP_LOGI(TAG, "CONFIGURANDO UART (BORDER NODE)");
+        ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
+        ESP_LOGI(TAG, "   UART_NUM: %d", kUartNum);
+        ESP_LOGI(TAG, "   TX Pin: %d (GPIO%d) -> Gateway RX (GPIO16)", kTxPin, kTxPin);
+        ESP_LOGI(TAG, "   RX Pin: %d (GPIO%d) <- Gateway TX (GPIO17)", kRxPin, kRxPin);
+        ESP_LOGI(TAG, "   Baud Rate: %d", kBaud);
+        ESP_LOGI(TAG, "   Buffer Size: %zu bytes", kBufSize);
+        ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
+        
         uart_config_t cfg{};
         cfg.baud_rate = kBaud;
         cfg.data_bits = UART_DATA_8_BITS;
@@ -33,13 +43,37 @@ namespace WetzelMesh
         cfg.stop_bits = UART_STOP_BITS_1;
         cfg.flow_ctrl = UART_HW_FLOWCTRL_DISABLE;
 
-        ESP_ERROR_CHECK(uart_param_config(kUartNum, &cfg));
-        ESP_ERROR_CHECK(uart_set_pin(kUartNum, kTxPin, kRxPin, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
-        ESP_ERROR_CHECK(uart_driver_install(kUartNum, kBufSize, kBufSize, 0, nullptr, 0));
+        esp_err_t err = uart_param_config(kUartNum, &cfg);
+        if (err != ESP_OK)
+        {
+            ESP_LOGE(TAG, "Falha ao configurar parâmetros UART: %s", esp_err_to_name(err));
+            return false;
+        }
+        
+        err = uart_set_pin(kUartNum, kTxPin, kRxPin, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+        if (err != ESP_OK)
+        {
+            ESP_LOGE(TAG, "Falha ao configurar pinos UART: %s", esp_err_to_name(err));
+            return false;
+        }
+        
+        err = uart_driver_install(kUartNum, kBufSize, kBufSize, 0, nullptr, 0);
+        if (err != ESP_OK)
+        {
+            ESP_LOGE(TAG, "Falha ao instalar driver UART: %s", esp_err_to_name(err));
+            return false;
+        }
 
+        ESP_LOGI(TAG, "UART configurada com sucesso!");
+        
+        // Pequeno delay para garantir que UART está totalmente inicializada
+        vTaskDelay(pdMS_TO_TICKS(100));
+        
         LedManager::set_uart_enabled(false);
+        ESP_LOGI(TAG, "Criando task de handshake...");
         xTaskCreatePinnedToCore(handshake_retry_task, "border_uart_hs", 4096, nullptr, 5, nullptr, tskNO_AFFINITY);
-        ESP_LOGI(TAG, "UART iniciada (TX=13 RX=15); aguardando handshake com Gateway...");
+        ESP_LOGI(TAG, "Task de handshake criada! Aguardando Gateway estar pronto...");
+        vTaskDelay(pdMS_TO_TICKS(500)); // Aguarda um pouco antes de começar handshake
         return true;
     }
 
@@ -52,10 +86,31 @@ namespace WetzelMesh
     {
         char header[16];
         int n = snprintf(header, sizeof(header), "%u\n", (unsigned)json.size());
-        if (n <= 0)
+        if (n <= 0 || n >= (int)sizeof(header))
+        {
+            ESP_LOGE(TAG, "TX[UART BORDER->GW] erro ao formatar header (n=%d)", n);
             return false;
-        uart_write_bytes(kUartNum, header, n);
-        uart_write_bytes(kUartNum, json.c_str(), json.size());
+        }
+        
+        // Escreve header
+        int w1 = uart_write_bytes(kUartNum, header, n);
+        if (w1 < 0 || w1 != n)
+        {
+            ESP_LOGE(TAG, "TX[UART BORDER->GW] erro ao escrever header (w1=%d, esperado=%d)", w1, n);
+            return false;
+        }
+        
+        // Escreve JSON
+        int w2 = uart_write_bytes(kUartNum, json.c_str(), json.size());
+        if (w2 < 0 || w2 != (int)json.size())
+        {
+            ESP_LOGE(TAG, "TX[UART BORDER->GW] erro ao escrever JSON (w2=%d, esperado=%zu)", w2, json.size());
+            return false;
+        }
+        
+        // Aguarda transmissão completar
+        uart_wait_tx_done(kUartNum, pdMS_TO_TICKS(1000));
+        
         return true;
     }
 
@@ -86,6 +141,10 @@ namespace WetzelMesh
                 vTaskDelay(pdMS_TO_TICKS(kRetryDelayMs));
             }
             
+            ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
+            ESP_LOGI(TAG, "Enviando PING para gateway (tentativa %d/%d)...", retry + 1, kMaxRetries);
+            ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
+            
             Protocol::Packet ping{};
             ping.type = Protocol::PacketType::EVENT;
             ping.method = "PING";
@@ -94,7 +153,15 @@ namespace WetzelMesh
             ping.body = "{}";
 
             std::string json = Protocol::serialize(ping);
-            BorderUart::uart_write_json(json);
+            ESP_LOGI(TAG, "PING serializado: %u bytes", (unsigned)json.size());
+            
+            if (!BorderUart::uart_write_json(json))
+            {
+                ESP_LOGE(TAG, "Falha ao enviar PING!");
+                continue;
+            }
+            
+            ESP_LOGI(TAG, "PING enviado com sucesso! Aguardando PONG...");
 
             std::string acc;
             acc.reserve(16);
@@ -118,39 +185,83 @@ namespace WetzelMesh
                 return acc;
             };
 
-        const TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(timeout_ms);
-        while (xTaskGetTickCount() < deadline)
-        {
-            std::string lenStr = read_line();
-            if (lenStr.empty())
-                continue;
-            int len = atoi(lenStr.c_str());
-            if (len <= 0 || len > (int)kBufSize)
-                continue;
-
-            std::vector<uint8_t> jsonBuf(len);
-            size_t got = 0;
-            while (got < (size_t)len)
+            // Aguarda resposta PONG dentro do loop de retry
+            ESP_LOGI(TAG, "Aguardando PONG (timeout: %u ms)...", timeout_ms);
+            const TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(timeout_ms);
+            while (xTaskGetTickCount() < deadline)
             {
-                int r = uart_read_bytes(kUartNum, jsonBuf.data() + got, len - got, pdMS_TO_TICKS(20));
-                if (r > 0)
-                    got += r;
-            }
+                // Verifica se há dados disponíveis
+                size_t buffered_size = 0;
+                uart_get_buffered_data_len(kUartNum, &buffered_size);
+                if (buffered_size > 0)
+                {
+                    ESP_LOGI(TAG, "Dados disponíveis na UART: %zu bytes", buffered_size);
+                }
+                
+                std::string lenStr = read_line();
+                if (lenStr.empty())
+                {
+                    // Timeout na leitura da linha - continua tentando até deadline
+                    vTaskDelay(pdMS_TO_TICKS(10));
+                    continue;
+                }
+                
+                ESP_LOGI(TAG, "Header recebido no handshake: '%s'", lenStr.c_str());
+                    
+                int len = atoi(lenStr.c_str());
+                if (len <= 0 || len > (int)kBufSize)
+                {
+                    ESP_LOGW(TAG, "Tamanho inválido no handshake: '%s' (len=%d)", lenStr.c_str(), len);
+                    continue;
+                }
 
-            Protocol::Packet pkt;
-            std::string body(reinterpret_cast<char *>(jsonBuf.data()), len);
-            if (!Protocol::parse(body, pkt))
-                continue;
+                ESP_LOGI(TAG, "Lendo %d bytes do PONG...", len);
+                std::vector<uint8_t> jsonBuf(len);
+                size_t got = 0;
+                const TickType_t read_deadline = xTaskGetTickCount() + pdMS_TO_TICKS(1000);
+                while (got < (size_t)len && xTaskGetTickCount() < read_deadline)
+                {
+                    int r = uart_read_bytes(kUartNum, jsonBuf.data() + got, len - got, pdMS_TO_TICKS(20));
+                    if (r > 0)
+                        got += r;
+                }
+                
+                if (got < (size_t)len)
+                {
+                    ESP_LOGW(TAG, "Timeout ao ler resposta do handshake (esperado %d, recebido %zu)", len, got);
+                    break; // Sai do loop interno, tenta novamente
+                }
 
-            if (pkt.type == Protocol::PacketType::EVENT && pkt.method == "PONG")
-            {
-                ESP_LOGI(TAG, "Handshake OK (PONG recebido)");
-                return true;
+                Protocol::Packet pkt;
+                std::string body(reinterpret_cast<char *>(jsonBuf.data()), len);
+                ESP_LOGI(TAG, "Dados recebidos: %zu bytes", body.size());
+                
+                if (!Protocol::parse(body, pkt))
+                {
+                    ESP_LOGW(TAG, "Falha ao parsear resposta do handshake");
+                    ESP_LOGW(TAG, "Body recebido: %s", body.c_str());
+                    continue;
+                }
+
+                ESP_LOGI(TAG, "Pacote parseado: type=%d method='%s' src='%s' dst='%s'", 
+                         (int)pkt.type, pkt.method.c_str(), pkt.route.src.c_str(), pkt.route.dst.c_str());
+
+                if (pkt.type == Protocol::PacketType::EVENT && pkt.method == "PONG")
+                {
+                    ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
+                    ESP_LOGI(TAG, "Handshake OK! PONG recebido do gateway!");
+                    ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
+                    return true;
+                }
+                else
+                {
+                    ESP_LOGW(TAG, "Resposta inesperada no handshake: type=%d method='%s'", 
+                             (int)pkt.type, pkt.method.c_str());
+                }
             }
-        }
-        
-        // Se chegou aqui, timeout sem receber PONG
-        ESP_LOGW(TAG, "Handshake timeout (tentativa %d/%d)", retry + 1, kMaxRetries);
+            
+            // Se chegou aqui, timeout sem receber PONG nesta tentativa
+            ESP_LOGW(TAG, "Handshake timeout (tentativa %d/%d)", retry + 1, kMaxRetries);
         }
         
         ESP_LOGE(TAG, "Handshake falhou após %d tentativas", kMaxRetries);
@@ -160,13 +271,15 @@ namespace WetzelMesh
     // ---------------------------------------------------------------------
     void BorderUart::uart_listen_task(void *)
     {
+        ESP_LOGI(TAG, "UART listen task iniciada - aguardando dados do gateway...");
         std::string acc;
         acc.reserve(16);
 
         auto read_line = [&]() -> std::string
         {
             acc.clear();
-            while (true)
+            const TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(5000); // Timeout de 5s para linha
+            while (xTaskGetTickCount() < deadline)
             {
                 uint8_t ch;
                 int r = uart_read_bytes(kUartNum, &ch, 1, pdMS_TO_TICKS(50));
@@ -189,23 +302,42 @@ namespace WetzelMesh
         {
             std::string lenStr = read_line();
             if (lenStr.empty())
+            {
+                // Timeout ou linha vazia - não é erro, apenas continua
+                vTaskDelay(pdMS_TO_TICKS(10));
                 continue;
+            }
+                
             int len = atoi(lenStr.c_str());
             if (len <= 0 || len > (int)kBufSize)
+            {
+                ESP_LOGW(TAG, "RX[UART BORDER<-GW] tamanho inválido: '%s' (len=%d)", lenStr.c_str(), len);
                 continue;
+            }
 
+            // Lê JSON com timeout
             size_t got = 0;
-            while (got < (size_t)len)
+            const TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(2000);
+            while (got < (size_t)len && xTaskGetTickCount() < deadline)
             {
                 int r = uart_read_bytes(kUartNum, buf.data() + got, len - got, pdMS_TO_TICKS(20));
                 if (r > 0)
                     got += r;
             }
+            
+            if (got < (size_t)len)
+            {
+                ESP_LOGW(TAG, "RX[UART BORDER<-GW] timeout ao ler %d bytes (recebido %zu)", len, got);
+                continue;
+            }
 
             std::string json(reinterpret_cast<char *>(buf.data()), len);
             Protocol::Packet pkt;
             if (!Protocol::parse(json, pkt))
+            {
+                ESP_LOGW(TAG, "RX[UART BORDER<-GW] falha ao parsear JSON (%d bytes)", len);
                 continue;
+            }
 
             ESP_LOGI(TAG, "RX[UART BORDER<-GW] from=%s dst=%s (%d bytes)",
                      pkt.route.src.c_str(), pkt.route.dst.c_str(), len);

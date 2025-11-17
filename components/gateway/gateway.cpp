@@ -50,6 +50,15 @@ namespace WetzelMesh
     
     // Estado WiFi
     static bool s_wifi_should_reconnect = false;
+    static bool s_scan_task_created = false;
+    
+    // Task auxiliar para resetar flag de scan
+    static void scan_reset_task(void *)
+    {
+        vTaskDelay(pdMS_TO_TICKS(30000));
+        s_scan_task_created = false;
+        vTaskDelete(nullptr);
+    }
 
     // ---------------------------------------------------------------------
     // Mantém método privado conforme seu header; não expomos fora da classe
@@ -57,34 +66,57 @@ namespace WetzelMesh
     {
         char header[16];
         int n = snprintf(header, sizeof(header), "%u\n", (unsigned)json.size());
-        if (n <= 0)
-            return false;
-
-        int w1 = uart_write_bytes(kUartNum, header, n);
-        int w2 = uart_write_bytes(kUartNum, json.c_str(), json.size());
-        if (w1 < 0 || w2 < 0)
+        if (n <= 0 || n >= (int)sizeof(header))
         {
-            ESP_LOGE(TAG, "TX[UART GW->BORDER] erro driver (w1=%d w2=%d)", w1, w2);
+            ESP_LOGE(TAG, "TX[UART GW->BORDER] erro ao formatar header (n=%d)", n);
             return false;
         }
+
+        // Escreve header
+        int w1 = uart_write_bytes(kUartNum, header, n);
+        if (w1 < 0 || w1 != n)
+        {
+            ESP_LOGE(TAG, "TX[UART GW->BORDER] erro ao escrever header (w1=%d, esperado=%d)", w1, n);
+            return false;
+        }
+
+        // Escreve JSON
+        int w2 = uart_write_bytes(kUartNum, json.c_str(), json.size());
+        if (w2 < 0 || w2 != (int)json.size())
+        {
+            ESP_LOGE(TAG, "TX[UART GW->BORDER] erro ao escrever JSON (w2=%d, esperado=%zu)", w2, json.size());
+            return false;
+        }
+
+        // Aguarda transmissão completar
+        uart_wait_tx_done(kUartNum, pdMS_TO_TICKS(1000));
+        
         return true;
     }
 
-    // Auxiliar local
+    // Auxiliar local - lê exatamente 'len' bytes com timeout total
     static bool uart_read_exact(size_t len, std::string &out)
     {
         out.resize(len);
         size_t got = 0;
-        while (got < len)
+        const TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(2000); // Timeout total de 2s
+        
+        while (got < len && xTaskGetTickCount() < deadline)
         {
             int r = uart_read_bytes(kUartNum, reinterpret_cast<uint8_t *>(&out[got]),
                                     len - got, pdMS_TO_TICKS(100));
             if (r > 0)
                 got += r;
             else
-                vTaskDelay(pdMS_TO_TICKS(5));
+                vTaskDelay(pdMS_TO_TICKS(10));
         }
-        return (got == len);
+        
+        if (got < len)
+        {
+            ESP_LOGW(TAG, "uart_read_exact: timeout - esperado %zu bytes, recebido %zu", len, got);
+            return false;
+        }
+        return true;
     }
 
     // Callback para eventos WiFi
@@ -109,8 +141,19 @@ namespace WetzelMesh
                     {
                         case WIFI_REASON_NO_AP_FOUND:
                             reason_str = "NO_AP_FOUND - Rede não encontrada (verifique SSID)";
-                            // Se não encontrou a rede, faz scan para diagnosticar
-                            xTaskCreatePinnedToCore(wifi_scan_task, "wifi_scan", 4096, nullptr, 3, nullptr, tskNO_AFFINITY);
+                            // Se não encontrou a rede, faz scan para diagnosticar (apenas uma vez, não toda vez)
+                            // Limita criação de tasks de scan para evitar múltiplas tasks
+                            if (!s_scan_task_created)
+                            {
+                                s_scan_task_created = true;
+                                ESP_LOGI(TAG, "Criando task de scan WiFi para diagnóstico...");
+                                xTaskCreatePinnedToCore(wifi_scan_task, "wifi_scan", 4096, nullptr, 3, nullptr, tskNO_AFFINITY);
+                                // Reset flag após 30 segundos para permitir novo scan se necessário
+                                xTaskCreatePinnedToCore(scan_reset_task, "scan_reset", 1024, nullptr, 1, nullptr, tskNO_AFFINITY);
+                            }
+                            break;
+                        case WIFI_REASON_AUTH_EXPIRE:
+                            reason_str = "AUTH_EXPIRE - Autenticação expirada";
                             break;
                         case WIFI_REASON_AUTH_FAIL:
                             reason_str = "AUTH_FAIL - Senha incorreta";
@@ -121,11 +164,32 @@ namespace WetzelMesh
                         case WIFI_REASON_HANDSHAKE_TIMEOUT:
                             reason_str = "HANDSHAKE_TIMEOUT - Timeout no handshake";
                             break;
+                        case WIFI_REASON_BEACON_TIMEOUT:
+                            reason_str = "BEACON_TIMEOUT - Timeout no beacon";
+                            break;
+                        case WIFI_REASON_CONNECTION_FAIL:
+                            reason_str = "CONNECTION_FAIL - Falha na conexão";
+                            break;
                         default:
-                            reason_str = "Desconhecido";
+                            // Para códigos desconhecidos, mostra o número
+                            if (disconnected->reason < 200)
+                            {
+                                reason_str = "Código padrão WiFi";
+                            }
+                            else
+                            {
+                                reason_str = "Código customizado/desconhecido";
+                            }
                             break;
                     }
-                    ESP_LOGW(TAG, "WiFi desconectado (reason: %d - %s)", disconnected->reason, reason_str);
+                    ESP_LOGW(TAG, "═══════════════════════════════════════════════════════");
+                    ESP_LOGW(TAG, "WiFi desconectado!");
+                    ESP_LOGW(TAG, "   Reason: %d - %s", disconnected->reason, reason_str);
+                    ESP_LOGW(TAG, "   SSID: %s", disconnected->ssid);
+                    ESP_LOGW(TAG, "   BSSID: %02x:%02x:%02x:%02x:%02x:%02x",
+                             disconnected->bssid[0], disconnected->bssid[1], disconnected->bssid[2],
+                             disconnected->bssid[3], disconnected->bssid[4], disconnected->bssid[5]);
+                    ESP_LOGW(TAG, "═══════════════════════════════════════════════════════");
                     LedManager::set_gateway_server_connected(false);
                     // Sinaliza para task de reconexão (não bloqueia o handler)
                     s_wifi_should_reconnect = true;
@@ -357,6 +421,10 @@ namespace WetzelMesh
         }
 
         ESP_LOGI(TAG, "WiFi iniciado com sucesso. Aguardando conexão...");
+        
+        // Pequeno delay para garantir que WiFi está totalmente inicializado
+        // O evento WIFI_EVENT_STA_START será disparado e chamará esp_wifi_connect()
+        vTaskDelay(pdMS_TO_TICKS(100));
     }
 
     // ---------------------------------------------------------------------
@@ -364,7 +432,9 @@ namespace WetzelMesh
     {
         ESP_LOGI(TAG, "");
         ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
+        ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
         ESP_LOGI(TAG, "INICIALIZANDO GATEWAY");
+        ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
         ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
         
         // Liberar memória BT (não usamos)
@@ -394,6 +464,16 @@ namespace WetzelMesh
         init_wifi();
 
         // UART para comunicação com o nó-borda
+        ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
+        ESP_LOGI(TAG, "CONFIGURANDO UART");
+        ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
+        ESP_LOGI(TAG, "   UART_NUM: %d", kUartNum);
+        ESP_LOGI(TAG, "   TX Pin: %d (GPIO%d) -> Node RX (GPIO15)", kTxPin, kTxPin);
+        ESP_LOGI(TAG, "   RX Pin: %d (GPIO%d) <- Node TX (GPIO13)", kRxPin, kRxPin);
+        ESP_LOGI(TAG, "   Baud Rate: %d", kBaud);
+        ESP_LOGI(TAG, "   Buffer Size: %zu bytes", kBufSize);
+        ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
+        
         uart_config_t cfg{};
         cfg.baud_rate = kBaud;
         cfg.data_bits = UART_DATA_8_BITS;
@@ -401,12 +481,36 @@ namespace WetzelMesh
         cfg.stop_bits = UART_STOP_BITS_1;
         cfg.flow_ctrl = UART_HW_FLOWCTRL_DISABLE;
 
-        ESP_ERROR_CHECK(uart_param_config(kUartNum, &cfg));
-        ESP_ERROR_CHECK(uart_set_pin(kUartNum, kTxPin, kRxPin, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
-        ESP_ERROR_CHECK(uart_driver_install(kUartNum, kBufSize, kBufSize, 0, nullptr, 0));
+        esp_err_t err = uart_param_config(kUartNum, &cfg);
+        if (err != ESP_OK)
+        {
+            ESP_LOGE(TAG, "Falha ao configurar parâmetros UART: %s", esp_err_to_name(err));
+            return;
+        }
+        
+        err = uart_set_pin(kUartNum, kTxPin, kRxPin, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+        if (err != ESP_OK)
+        {
+            ESP_LOGE(TAG, "Falha ao configurar pinos UART: %s", esp_err_to_name(err));
+            return;
+        }
+        
+        err = uart_driver_install(kUartNum, kBufSize, kBufSize, 0, nullptr, 0);
+        if (err != ESP_OK)
+        {
+            ESP_LOGE(TAG, "Falha ao instalar driver UART: %s", esp_err_to_name(err));
+            return;
+        }
+        
+        ESP_LOGI(TAG, "UART configurada com sucesso!");
+        
+        // Pequeno delay para garantir que UART está totalmente inicializada
+        vTaskDelay(pdMS_TO_TICKS(100));
 
         // RX pela UART (GW <- Nó)
+        ESP_LOGI(TAG, "Criando task de escuta UART...");
         xTaskCreatePinnedToCore(uart_listen_task, "gw_uart_rx", 4096, nullptr, 5, nullptr, tskNO_AFFINITY);
+        ESP_LOGI(TAG, "Task de escuta UART criada! Gateway pronto para receber conexões.");
 
         // Task para processar requisições HTTP
         xTaskCreatePinnedToCore(http_request_task, "gw_http", 8192, nullptr, 5, nullptr, tskNO_AFFINITY);
@@ -436,13 +540,21 @@ namespace WetzelMesh
 
     void Gateway::uart_listen_task(void *)
     {
+        ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
+        ESP_LOGI(TAG, "UART LISTEN TASK INICIADA");
+        ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
+        ESP_LOGI(TAG, "Gateway aguardando dados do border node na UART...");
+        ESP_LOGI(TAG, "UART_NUM: %d, RX Pin: GPIO%d", kUartNum, kRxPin);
+        ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
+        
         std::string acc;
         acc.reserve(16);
 
         auto read_line = [&]() -> std::string
         {
             acc.clear();
-            while (true)
+            const TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(5000); // Timeout de 5s para linha
+            while (xTaskGetTickCount() < deadline)
             {
                 uint8_t ch;
                 int r = uart_read_bytes(kUartNum, &ch, 1, pdMS_TO_TICKS(50));
@@ -459,32 +571,74 @@ namespace WetzelMesh
             return acc;
         };
 
+        // Log periódico para indicar que está escutando
+        TickType_t last_status_log = xTaskGetTickCount();
+        const TickType_t status_log_interval = pdMS_TO_TICKS(10000); // A cada 10 segundos
+        
         for (;;)
         {
+            // Log periódico mostrando que está escutando
+            TickType_t now = xTaskGetTickCount();
+            if (now - last_status_log >= status_log_interval)
+            {
+                ESP_LOGI(TAG, "UART: Gateway ainda escutando... (aguardando border node)");
+                last_status_log = now;
+            }
+            
+            // Verifica se há dados disponíveis antes de tentar ler
+            size_t buffered_size = 0;
+            uart_get_buffered_data_len(kUartNum, &buffered_size);
+            if (buffered_size > 0)
+            {
+                ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
+                ESP_LOGI(TAG, "DADOS DETECTADOS NA UART: %zu bytes", buffered_size);
+                ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
+            }
+            
             std::string lenStr = read_line();
             if (lenStr.empty())
+            {
+                // Timeout ou linha vazia - não é erro, apenas continua
+                vTaskDelay(pdMS_TO_TICKS(10));
                 continue;
+            }
+            
+            ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
+            ESP_LOGI(TAG, "RX[UART GW] Header recebido: '%s'", lenStr.c_str());
+            ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
 
             int len = atoi(lenStr.c_str());
             if (len <= 0 || len > (int)kBufSize)
+            {
+                ESP_LOGW(TAG, "RX[UART GW<-BORDER] tamanho inválido: '%s' (len=%d)", lenStr.c_str(), len);
                 continue;
+            }
 
             std::string json;
             if (!uart_read_exact((size_t)len, json))
+            {
+                ESP_LOGW(TAG, "RX[UART GW<-BORDER] falha ao ler %d bytes", len);
                 continue;
+            }
 
             Protocol::Packet pkt;
             if (!Protocol::parse(json, pkt))
+            {
+                ESP_LOGW(TAG, "RX[UART GW<-BORDER] falha ao parsear JSON (%d bytes)", len);
                 continue;
+            }
 
             ESP_LOGI(TAG, "RX[UART GW<-BORDER] from=%s dst=%s (%d bytes)",
                      pkt.route.src.c_str(), pkt.route.dst.c_str(), len);
             LedManager::set_gateway_uart_connected(true); // Marca UART como conectada
-            ESP_LOGI(TAG, "UART: CONECTADO com border node");
             LedManager::blink(TrafficSource::UART);
 
             if (pkt.type == Protocol::PacketType::EVENT && pkt.method == "PING")
             {
+                ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
+                ESP_LOGI(TAG, "PING recebido do border node! Enviando PONG...");
+                ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
+                
                 Protocol::Packet pong{};
                 pong.type = Protocol::PacketType::EVENT;
                 pong.method = "PONG";
@@ -492,8 +646,19 @@ namespace WetzelMesh
                 pong.route.dst = pkt.route.src;
                 pong.body = R"({"status":"alive"})";
 
-                ESP_LOGI(TAG, "TX[UART GW->BORDER] PONG para %s", pong.route.dst.c_str());
-                uart_write_json(Protocol::serialize(pong));
+                std::string pong_json = Protocol::serialize(pong);
+                ESP_LOGI(TAG, "TX[UART GW->BORDER] PONG para %s (%u bytes)", 
+                         pong.route.dst.c_str(), (unsigned)pong_json.size());
+                
+                if (uart_write_json(pong_json))
+                {
+                    ESP_LOGI(TAG, "PONG enviado com sucesso!");
+                }
+                else
+                {
+                    ESP_LOGE(TAG, "Falha ao enviar PONG!");
+                }
+                ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
                 continue;
             }
 
@@ -521,6 +686,9 @@ namespace WetzelMesh
     static void wifi_scan_task(void *)
     {
         // Aguarda mais tempo para garantir que WiFi não está mais tentando conectar
+        ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
+        ESP_LOGI(TAG, "INICIANDO SCAN WIFI PARA DIAGNÓSTICO");
+        ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
         ESP_LOGI(TAG, "Aguardando WiFi estabilizar antes do scan...");
         vTaskDelay(pdMS_TO_TICKS(5000));
         
@@ -533,63 +701,32 @@ namespace WetzelMesh
             return;
         }
         
-        // Salva configuração WiFi atual antes de fazer scan
-        wifi_config_t saved_wifi_config = {};
-        esp_err_t config_err = esp_wifi_get_config(WIFI_IF_STA, &saved_wifi_config);
-        bool need_rebuild_config = (config_err != ESP_OK);
-        
-        if (need_rebuild_config)
+        // Verifica estado do WiFi antes de fazer scan
+        wifi_mode_t mode;
+        esp_err_t mode_err = esp_wifi_get_mode(&mode);
+        if (mode_err != ESP_OK)
         {
-            ESP_LOGW(TAG, "Não foi possível obter configuração WiFi: %s, reconstruindo...", esp_err_to_name(config_err));
-            // Reconstrói configuração completa do menuconfig
-            memset(&saved_wifi_config, 0, sizeof(saved_wifi_config));
-            
-#ifdef CONFIG_WETZEL_GATEWAY_WIFI_SSID
-            const char* ssid = CONFIG_WETZEL_GATEWAY_WIFI_SSID;
-            size_t ssid_len = strlen(ssid);
-            if (ssid_len > 0 && ssid_len < sizeof(saved_wifi_config.sta.ssid))
-            {
-                memcpy(saved_wifi_config.sta.ssid, ssid, ssid_len);
-                saved_wifi_config.sta.ssid[ssid_len] = '\0';
-            }
-#endif
-#ifdef CONFIG_WETZEL_GATEWAY_WIFI_PASSWORD
-            const char* password = CONFIG_WETZEL_GATEWAY_WIFI_PASSWORD;
-            size_t pwd_len = strlen(password);
-            if (pwd_len > 0 && pwd_len < sizeof(saved_wifi_config.sta.password))
-            {
-                memcpy(saved_wifi_config.sta.password, password, pwd_len);
-                saved_wifi_config.sta.password[pwd_len] = '\0';
-                saved_wifi_config.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
-            }
-            else
-            {
-                saved_wifi_config.sta.threshold.authmode = WIFI_AUTH_OPEN;
-            }
-#else
-            saved_wifi_config.sta.threshold.authmode = WIFI_AUTH_OPEN;
-#endif
-            // Restaura todas as configurações padrão
-            saved_wifi_config.sta.pmf_cfg.capable = true;
-            saved_wifi_config.sta.pmf_cfg.required = false;
-            saved_wifi_config.sta.scan_method = WIFI_FAST_SCAN;
-            saved_wifi_config.sta.sort_method = WIFI_CONNECT_AP_BY_SIGNAL;
-            saved_wifi_config.sta.threshold.rssi = -127;
-            saved_wifi_config.sta.bssid_set = false;
+            ESP_LOGW(TAG, "Não foi possível verificar modo WiFi: %s", esp_err_to_name(mode_err));
+            vTaskDelete(nullptr);
+            return;
         }
         
-        // Para o WiFi temporariamente para fazer scan sem conflitos
-        ESP_LOGI(TAG, "Parando WiFi temporariamente para fazer scan...");
-        esp_wifi_stop();
-        vTaskDelay(pdMS_TO_TICKS(500));
+        // Se WiFi está em modo STA e não conectado, pode fazer scan sem parar
+        if (mode != WIFI_MODE_STA)
+        {
+            ESP_LOGW(TAG, "WiFi não está em modo STA, abortando scan");
+            vTaskDelete(nullptr);
+            return;
+        }
         
-        // Reinicia WiFi em modo STA para fazer scan
-        esp_wifi_set_mode(WIFI_MODE_STA);
-        esp_wifi_start();
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        ESP_LOGI(TAG, "WiFi em modo STA, fazendo scan sem parar WiFi...");
+        vTaskDelay(pdMS_TO_TICKS(1000)); // Aguarda um pouco para WiFi estar estável
         
         // Mostra qual SSID está sendo procurado
-        const char* target_ssid = CONFIG_WETZEL_GATEWAY_WIFI_SSID;
+        const char* target_ssid = nullptr;
+#ifdef CONFIG_WETZEL_GATEWAY_WIFI_SSID
+        target_ssid = CONFIG_WETZEL_GATEWAY_WIFI_SSID;
+#endif
         ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
         ESP_LOGI(TAG, "INICIANDO SCAN WIFI");
         ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
@@ -653,21 +790,8 @@ namespace WetzelMesh
             ESP_LOGW(TAG, "Falha no scan: %s", esp_err_to_name(scan_err));
         }
         
-        // Reconecta WiFi após scan com configuração salva
-        ESP_LOGI(TAG, "Reiniciando WiFi para tentar conexão novamente...");
-        esp_wifi_stop();
-        vTaskDelay(pdMS_TO_TICKS(500));
-        
-        // Restaura configuração WiFi original
-        esp_wifi_set_mode(WIFI_MODE_STA);
-        esp_err_t set_config_err = esp_wifi_set_config(WIFI_IF_STA, &saved_wifi_config);
-        if (set_config_err != ESP_OK)
-        {
-            ESP_LOGE(TAG, "Falha ao restaurar configuração WiFi: %s", esp_err_to_name(set_config_err));
-        }
-        esp_wifi_start();
-        vTaskDelay(pdMS_TO_TICKS(1000));
-        esp_wifi_connect();
+        // Não reinicia WiFi - deixa a task de reconexão cuidar disso
+        ESP_LOGI(TAG, "Scan completo. WiFi continuará tentando conectar automaticamente.");
         
         vTaskDelete(nullptr); // Task única, se deleta após completar
     }

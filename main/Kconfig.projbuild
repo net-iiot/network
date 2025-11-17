@@ -80,14 +80,14 @@ menu "Credenciais de Rede"
 
 config WETZEL_GATEWAY_WIFI_SSID
     string "SSID da Rede WiFi"
-    default "industria40"
+    default "HP 4454G"
     help
       Nome da rede WiFi que o gateway irá conectar.
       Configure o nome exato da sua rede WiFi aqui.
 
 config WETZEL_GATEWAY_WIFI_PASSWORD
     string "Senha da Rede WiFi"
-    default "wetzel40"
+    default "Blink182"
     help
       Senha da rede WiFi. Deixe vazio para rede aberta.
       Configure a senha da sua rede WiFi aqui.
