@@ -24,30 +24,12 @@ namespace WetzelMesh
 #ifndef CONFIG_WETZEL_TEST_MODE
     static void real_mode_task(void *)
     {
-        std::srand(static_cast<unsigned>(time(nullptr)));
-        int seq = 0;
-
+        // Node não gera dados próprios - apenas repassa dados recebidos
+        // O gateway é quem gera e envia os dados
+        ESP_LOGI(TAG, "Modo REAL: Node aguardando dados do gateway (não gera dados próprios)");
         for (;;)
         {
-            // Monta um pacote de teste válido
-            Protocol::Packet pkt{};
-            pkt.type = Protocol::PacketType::EVENT;
-            pkt.method = "DATA";
-            pkt.route.src = BLETransport::node_id();
-            pkt.route.dst = "gateway";
-            pkt.body = "{\"temp\":" + std::to_string(20 + (std::rand() % 10)) +
-                       ",\"hum\":" + std::to_string(50 + (std::rand() % 20)) +
-                       ",\"seq\":" + std::to_string(seq++) + "}";
-
-            ESP_LOGI(TAG, "Gerando pacote de teste: %s", pkt.body.c_str());
-
-            // Indica atividade visual
-            LedManager::blink(TrafficSource::MESH);
-
-            // Envia normalmente pela malha
-            NetworkManager::send(pkt);
-
-            vTaskDelay(pdMS_TO_TICKS(1000)); // 1 s
+            vTaskDelay(pdMS_TO_TICKS(10000)); // Apenas mantém a task viva
         }
     }
 #endif // CONFIG_WETZEL_TEST_MODE

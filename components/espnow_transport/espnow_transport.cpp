@@ -180,7 +180,11 @@ namespace WetzelMesh
             return false;
         }
 
-        LedManager::blink(TrafficSource::MESH);
+        // Só pisca LED para dados reais, não para mensagens HELLO (controle de topologia)
+        if (!(p.type == Protocol::PacketType::EVENT && p.method == "HELLO"))
+        {
+            LedManager::blink(TrafficSource::MESH);
+        }
         return true;
     }
 
@@ -232,10 +236,16 @@ namespace WetzelMesh
                      pkt.route.src.c_str(), pkt.route.dst.c_str(), rssi, len);
 
             if (pkt.type == Protocol::PacketType::EVENT && pkt.method == "HELLO")
+            {
                 NetworkManager::on_hello(pkt.route.src, rssi);
-
-            Router::handle_packet(pkt);
-            LedManager::blink(TrafficSource::MESH);
+                // Não pisca LED para mensagens HELLO (são apenas controle de topologia)
+            }
+            else
+            {
+                // Só pisca LED para dados reais (não HELLO)
+                Router::handle_packet(pkt);
+                LedManager::blink(TrafficSource::MESH);
+            }
         }
         else
         {

@@ -19,6 +19,8 @@
 #include <mutex>
 #include <cstring>
 #include <cassert>
+#include <cstdlib>
+#include <ctime>
 
 namespace WetzelMesh
 {
@@ -852,32 +854,11 @@ namespace WetzelMesh
     {
 #ifdef CONFIG_WETZEL_TEST_MODE
         // Modo TESTE: Gateway inicia token passing
-        ESP_LOGI(TAG, "Modo TESTE: Gateway aguardando UART conectar para iniciar token...");
-        vTaskDelay(pdMS_TO_TICKS(7000)); // Aguarda rede estabilizar
+        ESP_LOGI(TAG, "Modo TESTE: Gateway iniciando token passing (não aguarda UART conectar)");
+        vTaskDelay(pdMS_TO_TICKS(2000)); // Pequeno delay para sistema estabilizar
         
-        // Aguarda UART conectar antes de iniciar token
-        int max_wait_seconds = 30; // Timeout máximo de 30 segundos
-        int waited_seconds = 0;
-        while (!LedManager::get_gateway_uart_connected() && waited_seconds < max_wait_seconds)
-        {
-            ESP_LOGW(TAG, "Aguardando UART conectar... (%d/%d segundos)", waited_seconds, max_wait_seconds);
-            vTaskDelay(pdMS_TO_TICKS(1000));
-            waited_seconds++;
-        }
-        
-        if (!LedManager::get_gateway_uart_connected())
-        {
-            ESP_LOGE(TAG, "Timeout aguardando UART conectar após %d segundos", max_wait_seconds);
-            ESP_LOGE(TAG, "Verifique: 1) Conexão física dos pinos UART, 2) Border node está enviando PING");
-            // Continua mesmo sem conexão para não travar o sistema
-        }
-        else
-        {
-            ESP_LOGI(TAG, "UART conectada após %d segundos", waited_seconds);
-        }
-        
-        // UART conectada, inicia token
-        ESP_LOGI(TAG, "Gateway iniciando token passing (UART conectada)");
+        // Inicia token imediatamente, sem esperar UART conectar
+        ESP_LOGI(TAG, "Gateway iniciando token passing");
         s_gateway_has_token = true;
         
         for (;;)
@@ -916,20 +897,43 @@ namespace WetzelMesh
             }
         }
 #else
-        // Modo REAL: Gateway envia HELLO periodicamente
+        // Modo REAL: Gateway gera e envia dados a cada 5 segundos infinitamente
+        ESP_LOGI(TAG, "Modo REAL: Gateway iniciando geração de dados a cada 5 segundos");
+        std::srand(static_cast<unsigned>(time(nullptr)));
+        int seq = 0;
+        
+        // Pequeno delay inicial para sistema estabilizar
+        vTaskDelay(pdMS_TO_TICKS(2000));
+        
         for (;;)
         {
             Protocol::Packet pkt{};
             pkt.type = Protocol::PacketType::EVENT;
-            pkt.method = "HELLO";
+            pkt.method = "DATA";
             pkt.route.src = "gateway";
             pkt.route.dst = "border";
-            pkt.body = R"({"msg":"from_gateway"})";
+            pkt.body = "{\"temp\":" + std::to_string(20 + (std::rand() % 10)) +
+                       ",\"hum\":" + std::to_string(50 + (std::rand() % 20)) +
+                       ",\"seq\":" + std::to_string(seq++) + "}";
+
+            ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
+            ESP_LOGI(TAG, "Gateway gerando e enviando dado #%d: %s", seq, pkt.body.c_str());
+            ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
 
             // ⚠️ Usa API pública, mantendo uart_write_json privada:
-            Gateway::send(pkt);
+            bool sent = Gateway::send(pkt);
+            if (sent)
+            {
+                ESP_LOGI(TAG, "Dado enviado com sucesso via UART");
+            }
+            else
+            {
+                ESP_LOGW(TAG, "Falha ao enviar dado via UART (continuando mesmo assim)");
+            }
 
-            vTaskDelay(pdMS_TO_TICKS(1000)); // a cada 1 s
+            ESP_LOGI(TAG, "Aguardando 5 segundos antes do próximo envio...");
+            vTaskDelay(pdMS_TO_TICKS(5000)); // a cada 5 s
+            ESP_LOGI(TAG, "5 segundos passaram, gerando próximo dado...");
         }
 #endif
     }

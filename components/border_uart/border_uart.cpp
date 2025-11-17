@@ -350,7 +350,7 @@ namespace WetzelMesh
 
             ESP_LOGI(TAG, "RX[UART BORDER<-GW] from=%s dst=%s (%d bytes)",
                      pkt.route.src.c_str(), pkt.route.dst.c_str(), len);
-            LedManager::blink(TrafficSource::UART);
+            LedManager::blink(TrafficSource::UART); // LED pisca quando recebe do UART
 
             // Processa TOKEN (modo teste) - token do gateway via UART
 #ifdef CONFIG_WETZEL_TEST_MODE
@@ -368,12 +368,18 @@ namespace WetzelMesh
             }
 #endif
 
-            // Reencaminha para a malha usando SEU módulo real:
-            if (pkt.method == "HELLO")
+            // Reencaminha TODOS os pacotes recebidos do UART para a rede mesh
+            // Border node aguarda 1 segundo antes de repassar (com LED aceso)
+            if (pkt.route.dst == "border" || pkt.route.dst == "broadcast" || pkt.route.dst.empty())
             {
-                ESP_LOGI(TAG, "→ Enviando HELLO para a rede ESP-NOW...");
+                // Border node recebeu dado do UART - mantém LED aceso durante 1 segundo antes de repassar
+                ESP_LOGI(TAG, "Border node recebeu dado do UART - mantendo LED aceso por 1 segundo antes de repassar...");
+                LedManager::set_led_on_for_duration(1000); // Mantém LED aceso por 1 segundo
+                vTaskDelay(pdMS_TO_TICKS(1000)); // Aguarda 1 segundo
+                
+                ESP_LOGI(TAG, "→ Reencaminhando pacote UART->MESH após 1 segundo: method=%s", pkt.method.c_str());
                 ESPNOWTransport::send(pkt);
-                LedManager::blink(TrafficSource::MESH);
+                LedManager::blink(TrafficSource::MESH); // LED pisca quando envia para a rede
             }
 
             if (s_rx_handler)
