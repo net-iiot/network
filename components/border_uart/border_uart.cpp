@@ -14,8 +14,8 @@ namespace WetzelMesh
     static const char *TAG = "BORDER_UART";
 
     static constexpr uart_port_t kUartNum = UART_NUM_1;
-    static constexpr int kTxPin = 13; // TX -> RX do Gateway (GPIO16)
-    static constexpr int kRxPin = 15; // RX <- TX do Gateway (GPIO17)
+    static constexpr int kTxPin = 15; // Teste: TX -> RX do Gateway (GPIO13)
+    static constexpr int kRxPin = 13; // Teste: RX <- TX do Gateway (GPIO15)
     static constexpr int kBaud = 115200;
     static constexpr size_t kBufSize = 2048;
 
@@ -43,6 +43,9 @@ namespace WetzelMesh
         cfg.stop_bits = UART_STOP_BITS_1;
         cfg.flow_ctrl = UART_HW_FLOWCTRL_DISABLE;
 
+        // IMPORTANTE: Verifica se UART já está instalada e remove se necessário
+        uart_driver_delete(kUartNum);
+        
         esp_err_t err = uart_param_config(kUartNum, &cfg);
         if (err != ESP_OK)
         {
@@ -50,6 +53,7 @@ namespace WetzelMesh
             return false;
         }
         
+        // Configura pinos ANTES de instalar o driver
         err = uart_set_pin(kUartNum, kTxPin, kRxPin, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
         if (err != ESP_OK)
         {
@@ -66,14 +70,14 @@ namespace WetzelMesh
 
         ESP_LOGI(TAG, "UART configurada com sucesso!");
         
-        // Pequeno delay para garantir que UART está totalmente inicializada
-        vTaskDelay(pdMS_TO_TICKS(100));
+        // Delay maior para garantir que UART está totalmente inicializada
+        vTaskDelay(pdMS_TO_TICKS(500)); // Aumentado de 100ms para 500ms
         
         LedManager::set_uart_enabled(false);
         ESP_LOGI(TAG, "Criando task de handshake...");
         xTaskCreatePinnedToCore(handshake_retry_task, "border_uart_hs", 4096, nullptr, 5, nullptr, tskNO_AFFINITY);
         ESP_LOGI(TAG, "Task de handshake criada! Aguardando Gateway estar pronto...");
-        vTaskDelay(pdMS_TO_TICKS(500)); // Aguarda um pouco antes de começar handshake
+        vTaskDelay(pdMS_TO_TICKS(2000)); // Aumentado de 500ms para 2000ms - dá mais tempo para Gateway inicializar
         return true;
     }
 
@@ -92,8 +96,11 @@ namespace WetzelMesh
             return false;
         }
         
+        ESP_LOGI(TAG, "TX[UART BORDER->GW] Enviando header: '%s' (len=%d)", header, n);
+        
         // Escreve header
         int w1 = uart_write_bytes(kUartNum, header, n);
+        ESP_LOGI(TAG, "TX[UART BORDER->GW] uart_write_bytes header retornou: %d (esperado: %d)", w1, n);
         if (w1 < 0 || w1 != n)
         {
             ESP_LOGE(TAG, "TX[UART BORDER->GW] erro ao escrever header (w1=%d, esperado=%d)", w1, n);
@@ -102,6 +109,7 @@ namespace WetzelMesh
         
         // Escreve JSON
         int w2 = uart_write_bytes(kUartNum, json.c_str(), json.size());
+        ESP_LOGI(TAG, "TX[UART BORDER->GW] uart_write_bytes JSON retornou: %d (esperado: %zu)", w2, json.size());
         if (w2 < 0 || w2 != (int)json.size())
         {
             ESP_LOGE(TAG, "TX[UART BORDER->GW] erro ao escrever JSON (w2=%d, esperado=%zu)", w2, json.size());
@@ -109,7 +117,8 @@ namespace WetzelMesh
         }
         
         // Aguarda transmissão completar
-        uart_wait_tx_done(kUartNum, pdMS_TO_TICKS(1000));
+        esp_err_t wait_err = uart_wait_tx_done(kUartNum, pdMS_TO_TICKS(1000));
+        ESP_LOGI(TAG, "TX[UART BORDER->GW] uart_wait_tx_done retornou: %s", esp_err_to_name(wait_err));
         
         return true;
     }

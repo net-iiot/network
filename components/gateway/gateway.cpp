@@ -26,8 +26,8 @@ namespace WetzelMesh
     static const char *TAG = "GATEWAY";
 
     static constexpr uart_port_t kUartNum = UART_NUM_1;
-    static constexpr int kTxPin = 17; // TX -> RX do nó-borda
-    static constexpr int kRxPin = 16; // RX <- TX do nó-borda
+    static constexpr int kTxPin = 17; // Teste: TX -> RX do nó-borda (GPIO15)
+    static constexpr int kRxPin = 16; // Teste: RX <- TX do nó-borda (GPIO13)
     static constexpr int kBaud = 115200;
     static constexpr size_t kBufSize = 2048;
     static constexpr size_t kMaxChunkSize = 1500; // Tamanho máximo de chunk
@@ -481,6 +481,9 @@ namespace WetzelMesh
         cfg.stop_bits = UART_STOP_BITS_1;
         cfg.flow_ctrl = UART_HW_FLOWCTRL_DISABLE;
 
+        // IMPORTANTE: Verifica se UART já está instalada e remove se necessário
+        uart_driver_delete(kUartNum);
+        
         esp_err_t err = uart_param_config(kUartNum, &cfg);
         if (err != ESP_OK)
         {
@@ -488,6 +491,7 @@ namespace WetzelMesh
             return;
         }
         
+        // Configura pinos ANTES de instalar o driver
         err = uart_set_pin(kUartNum, kTxPin, kRxPin, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
         if (err != ESP_OK)
         {
@@ -504,8 +508,8 @@ namespace WetzelMesh
         
         ESP_LOGI(TAG, "UART configurada com sucesso!");
         
-        // Pequeno delay para garantir que UART está totalmente inicializada
-        vTaskDelay(pdMS_TO_TICKS(100));
+        // Delay maior para garantir que UART está totalmente inicializada
+        vTaskDelay(pdMS_TO_TICKS(500)); // Aumentado de 100ms para 500ms
 
         // RX pela UART (GW <- Nó)
         ESP_LOGI(TAG, "Criando task de escuta UART...");
@@ -524,7 +528,7 @@ namespace WetzelMesh
         // Gera tráfego de teste HELLO → valida caminho completo UART→MESH
         xTaskCreatePinnedToCore(test_packet_task, "gw_uart_tx_test", 4096, nullptr, 5, nullptr, tskNO_AFFINITY);
 
-        ESP_LOGI(TAG, "Gateway inicializado (UART TX=17 RX=16, Server=%s).", s_server_url.c_str());
+        ESP_LOGI(TAG, "Gateway inicializado (UART TX=%d RX=%d, Server=%s).", kTxPin, kRxPin, s_server_url.c_str());
     }
     
     void Gateway::set_server_url(const std::string &url)
@@ -614,6 +618,16 @@ namespace WetzelMesh
                 continue;
             }
 
+            // ✅ CORREÇÃO: Marca UART como conectada assim que recebe header válido
+            // Isso garante que a flag seja setada o mais cedo possível
+            if (!LedManager::get_gateway_uart_connected())
+            {
+                ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
+                ESP_LOGI(TAG, "UART CONECTADA! Header válido recebido do border node");
+                ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
+                LedManager::set_gateway_uart_connected(true);
+            }
+
             std::string json;
             if (!uart_read_exact((size_t)len, json))
             {
@@ -630,7 +644,8 @@ namespace WetzelMesh
 
             ESP_LOGI(TAG, "RX[UART GW<-BORDER] from=%s dst=%s (%d bytes)",
                      pkt.route.src.c_str(), pkt.route.dst.c_str(), len);
-            LedManager::set_gateway_uart_connected(true); // Marca UART como conectada
+            // ✅ REMOVIDO: Flag já foi setada acima quando recebeu header válido
+            // LedManager::set_gateway_uart_connected(true); // Marca UART como conectada
             LedManager::blink(TrafficSource::UART);
 
             if (pkt.type == Protocol::PacketType::EVENT && pkt.method == "PING")
@@ -841,10 +856,24 @@ namespace WetzelMesh
         vTaskDelay(pdMS_TO_TICKS(7000)); // Aguarda rede estabilizar
         
         // Aguarda UART conectar antes de iniciar token
-        while (!LedManager::get_gateway_uart_connected())
+        int max_wait_seconds = 30; // Timeout máximo de 30 segundos
+        int waited_seconds = 0;
+        while (!LedManager::get_gateway_uart_connected() && waited_seconds < max_wait_seconds)
         {
-            ESP_LOGW(TAG, "Aguardando UART conectar...");
+            ESP_LOGW(TAG, "Aguardando UART conectar... (%d/%d segundos)", waited_seconds, max_wait_seconds);
             vTaskDelay(pdMS_TO_TICKS(1000));
+            waited_seconds++;
+        }
+        
+        if (!LedManager::get_gateway_uart_connected())
+        {
+            ESP_LOGE(TAG, "Timeout aguardando UART conectar após %d segundos", max_wait_seconds);
+            ESP_LOGE(TAG, "Verifique: 1) Conexão física dos pinos UART, 2) Border node está enviando PING");
+            // Continua mesmo sem conexão para não travar o sistema
+        }
+        else
+        {
+            ESP_LOGI(TAG, "UART conectada após %d segundos", waited_seconds);
         }
         
         // UART conectada, inicia token

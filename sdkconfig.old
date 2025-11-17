@@ -435,9 +435,9 @@ CONFIG_PARTITION_TABLE_MD5=y
 #
 # Wetzel Mesh (Configurações)
 #
-CONFIG_WM_ROLE_GATEWAY=y
-# CONFIG_WM_ROLE_NODE is not set
-CONFIG_WETZEL_IS_GATEWAY=y
+# CONFIG_WM_ROLE_GATEWAY is not set
+CONFIG_WM_ROLE_NODE=y
+CONFIG_WETZEL_ENABLE_BLE=y
 
 #
 # Modo de Operação
@@ -447,14 +447,6 @@ CONFIG_WM_MODE_TEST=y
 CONFIG_WETZEL_TEST_MODE=y
 CONFIG_WETZEL_TOKEN_HOLD_TIME_MS=5000
 # end of Modo de Operação
-
-#
-# Credenciais de Rede
-#
-CONFIG_WETZEL_GATEWAY_WIFI_SSID="industria40"
-CONFIG_WETZEL_GATEWAY_WIFI_PASSWORD="wetzel40"
-CONFIG_WETZEL_GATEWAY_SERVER_URL="http://172.16.10.110:80"
-# end of Credenciais de Rede
 # end of Wetzel Mesh (Configurações)
 
 #
