@@ -87,8 +87,9 @@ namespace WetzelMesh
 
     bool ESPNOWTransport::ensure_broadcast_peer()
     {
-        const uint8_t* pmk = NetworkManager::get_pmk();
-        bool encryption_enabled = true;  // Sempre habilitado se PMK configurado
+        // ESP-NOW não suporta criptografia para endereços multicast (broadcast)
+        // Portanto, sempre desabilitamos criptografia para o peer broadcast
+        bool encryption_enabled = false;
         
 #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(4, 4, 0)
         if (esp_now_is_peer_exist(kBroadcast))
@@ -112,7 +113,7 @@ namespace WetzelMesh
         esp_err_t err = esp_now_add_peer(&peer);
         if (err == ESP_OK || err == ESP_ERR_ESPNOW_EXIST)
         {
-            ESP_LOGI(TAG, "Peer broadcast ativo (canal %u, encryption: SIM, Network: %s)", 
+            ESP_LOGI(TAG, "Peer broadcast ativo (canal %u, encryption: NÃO, Network: %s)", 
                      s_channel, NetworkManager::get_network_id().c_str());
             return true;
         }

@@ -12,6 +12,7 @@ config WM_ROLE_GATEWAY
       Compila/roda como GATEWAY:
       - BLE e ESPNOW desativados;
       - Apenas UART com o nó-borda e caminho ao servidor.
+      - Gera dados de teste a cada 5 segundos (modo TESTE) ou dados reais (modo PRODUÇÃO).
 
 config WM_ROLE_NODE
     bool "Node"
@@ -35,26 +36,27 @@ config WETZEL_ENABLE_BLE
       Ativa o transporte BLE nos nós (advertising/scan/GATT conforme BLETransport).
       Desligar reduz consumo/ruído de logs. A malha via ESPNOW continua funcionando.
 
-menu "Modo de Operação"
-    help
-      Configure o modo de operação do sistema (TESTE ou REAL).
-
 choice WM_OPERATION_MODE
-    prompt "Tipo de Modo"
+    prompt "Modo de Operação"
     default WM_MODE_REAL
     help
-      Selecione se o sistema roda em modo TESTE (token passing) ou REAL (produção).
+      Selecione se o sistema roda em modo TESTE ou PRODUÇÃO.
+      
+      TESTE: Gateway gera dados a cada 5 segundos que ficam 1 segundo em cada node.
+      PRODUÇÃO: Modo de produção normal com comunicação real de dados.
 
 config WM_MODE_TEST
-    bool "Modo TESTE (Token Passing)"
+    bool "Modo TESTE"
     help
-      Modo de teste onde um token circula pela rede.
-      Cada node mantém o token por um tempo configurável antes de passar adiante.
+      Modo de teste onde o gateway gera dados a cada 5 segundos.
+      Cada node mantém o dado por 1 segundo antes de repassar.
+      LED fica aceso durante o tempo de espera em cada node.
 
 config WM_MODE_REAL
-    bool "Modo REAL (Produção)"
+    bool "Modo PRODUÇÃO"
     help
       Modo de produção normal com comunicação real de dados.
+      Gateway não gera dados de teste automaticamente.
 endchoice
 
 config WETZEL_TEST_MODE
@@ -62,21 +64,11 @@ config WETZEL_TEST_MODE
     default y if WM_MODE_TEST
     default n if WM_MODE_REAL
 
-config WETZEL_TOKEN_HOLD_TIME_MS
-    int "Tempo que token fica em cada node (ms)"
-    depends on WM_MODE_TEST
-    default 5000
-    range 100 10000
-    help
-      Tempo em milissegundos que cada node mantém o token antes de passar para o próximo.
-      Durante este tempo, o LED do node fica aceso.
-
-endmenu
-
 menu "Isolamento de Rede"
     help
       Configure o isolamento de redes mesh. Nodes só se conectam a outros nodes
       com o mesmo Network ID, canal WiFi e chave de criptografia.
+      IMPORTANTE: Todos os nodes da mesma rede física devem ter o mesmo Network ID e Canal.
 
 config WETZEL_NETWORK_ID
     string "Network ID (identificador da rede)"
@@ -85,7 +77,7 @@ config WETZEL_NETWORK_ID
       Identificador único da rede mesh. Nodes só se conectam a outros nodes
       com o mesmo Network ID. A chave de criptografia ESP-NOW é derivada
       deste ID, garantindo isolamento total entre redes.
-      IMPORTANTE: Todos os nodes da mesma rede física devem ter o mesmo Network ID.
+      Exemplo: "rede-01", "rede-02", "rede-03"
 
 config WETZEL_WIFI_CHANNEL
     int "Canal WiFi para ESP-NOW (1-13)"
@@ -93,7 +85,6 @@ config WETZEL_WIFI_CHANNEL
     range 1 13
     help
       Canal WiFi usado para comunicação ESP-NOW.
-      IMPORTANTE: Todos os nodes da mesma rede devem usar o mesmo canal.
       Recomendado: 1, 6 ou 11 (não se sobrepõem).
       Para múltiplas redes, use canais diferentes:
       - Rede 1: canal 1
@@ -102,31 +93,34 @@ config WETZEL_WIFI_CHANNEL
 
 endmenu
 
-menu "Credenciais de Rede"
+menu "Credenciais de Rede (apenas Gateway)"
     depends on WM_ROLE_GATEWAY
     help
       Configure as credenciais de rede para o Gateway (WiFi e servidor).
+      Estas configurações são usadas apenas quando o firmware roda como Gateway.
 
 config WETZEL_GATEWAY_WIFI_SSID
     string "SSID da Rede WiFi"
-    default "HP 4454G"
+    default ""
     help
       Nome da rede WiFi que o gateway irá conectar.
       Configure o nome exato da sua rede WiFi aqui.
+      Exemplo: "MinhaRedeWiFi"
 
 config WETZEL_GATEWAY_WIFI_PASSWORD
     string "Senha da Rede WiFi"
-    default "Blink182"
+    default ""
     help
       Senha da rede WiFi. Deixe vazio para rede aberta.
       Configure a senha da sua rede WiFi aqui.
 
 config WETZEL_GATEWAY_SERVER_URL
     string "URL do Servidor HTTP"
-    default "http://172.16.10.110:80"
+    default "http://192.168.1.100:8080"
     help
-      URL completa do servidor HTTP (ex: http://172.16.10.110:80).
-      Configure a URL do servidor que receberá as requisições HTTP.
+      URL completa do servidor HTTP onde o microserviço está rodando.
+      Exemplo: http://192.168.1.100:8080
+      O gateway enviará todos os dados recebidos da mesh para este servidor.
 
 endmenu
 

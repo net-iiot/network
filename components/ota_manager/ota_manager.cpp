@@ -27,33 +27,39 @@ namespace WetzelMesh
 
     std::string OTAManager::get_version_string()
     {
-        const esp_app_desc_t *app_desc = esp_ota_get_app_description();
-        if (app_desc)
-        {
-            std::ostringstream oss;
-            oss << app_desc->version << "-" << app_desc->project_name;
-            return oss.str();
-        }
-        return "unknown";
+        const esp_app_desc_t *app_desc = esp_app_get_description();
+        std::ostringstream oss;
+        oss << app_desc->version << "-" << app_desc->project_name;
+        return oss.str();
     }
 
     FirmwareVersion OTAManager::get_current_version()
     {
-        const esp_app_desc_t *app_desc = esp_ota_get_app_description();
-        if (app_desc)
-        {
-            s_current_version.version = app_desc->version;
-            s_current_version.build_date = app_desc->date;
-            s_current_version.build_number = app_desc->idf_ver.major * 10000 + 
-                                            app_desc->idf_ver.minor * 100 + 
-                                            app_desc->idf_ver.patch;
-            
-            // Calcula hash simples do firmware
-            std::ostringstream oss;
-            oss << app_desc->version << app_desc->date << app_desc->time;
-            s_current_version.hash = oss.str();
+        const esp_app_desc_t *app_desc = esp_app_get_description();
+        s_current_version.version = app_desc->version;
+        s_current_version.build_date = app_desc->date;
+        
+        // idf_ver é uma string, não uma estrutura
+        // Usa um hash simples da string como build_number
+        std::string idf_ver_str = app_desc->idf_ver;
+        uint32_t hash = 0;
+        for (char c : idf_ver_str) {
+            hash = hash * 31 + c;
         }
+        s_current_version.build_number = hash;
+        
+        // Calcula hash simples do firmware
+        std::ostringstream oss;
+        oss << app_desc->version << app_desc->date << app_desc->time;
+        s_current_version.hash = oss.str();
+        
         return s_current_version;
+    }
+
+    // Wrapper C para a task (xTaskCreate precisa de função C, não método C++)
+    static void ota_task_wrapper(void *param)
+    {
+        OTAManager::ota_task(param);
     }
 
     void OTAManager::init(bool isGateway, const std::string &server_url)
@@ -75,7 +81,7 @@ namespace WetzelMesh
         if (isGateway)
         {
             // Gateway: cria task para verificar atualizações periodicamente
-            xTaskCreatePinnedToCore(ota_task, "ota_task", 8192, nullptr, 5, nullptr, tskNO_AFFINITY);
+            xTaskCreatePinnedToCore(ota_task_wrapper, "ota_task", 8192, nullptr, 5, nullptr, tskNO_AFFINITY);
         }
     }
 
@@ -151,14 +157,15 @@ namespace WetzelMesh
                 char *buffer = (char *)malloc(content_length + 1);
                 if (buffer)
                 {
-                    int data_read = esp_http_client_read_response(client, buffer, content_length);
-                    buffer[data_read] = '\0';
-                    
-                    ESP_LOGI(TAG, "Resposta do servidor: %s", buffer);
-                    
-                    // Parse da resposta e comparação de versão
-                    // Por enquanto, apenas loga
-                    
+                    int data_read = esp_http_client_read(client, buffer, content_length);
+                    if (data_read > 0)
+                    {
+                        buffer[data_read] = '\0';
+                        ESP_LOGI(TAG, "Resposta do servidor: %s", buffer);
+                        
+                        // Parse da resposta e comparação de versão
+                        // Por enquanto, apenas loga
+                    }
                     free(buffer);
                 }
             }
@@ -238,14 +245,16 @@ namespace WetzelMesh
 
     bool OTAManager::download_firmware(const std::string &url)
     {
-        esp_http_client_config_t config = {};
-        config.url = url.c_str();
-        config.timeout_ms = 30000;
-        config.buffer_size = 1024;
-        config.skip_cert_common_name_check = true;  // Pula verificação de certificado
+        // Configuração HTTP para OTA
+        esp_http_client_config_t http_config = {};
+        http_config.url = url.c_str();
+        http_config.timeout_ms = 30000;
+        http_config.buffer_size = 1024;
+        http_config.skip_cert_common_name_check = true;  // Pula verificação de certificado
         
+        // Configuração OTA
         esp_https_ota_config_t ota_config = {};
-        ota_config.http_config = config;
+        ota_config.http_config = &http_config;
         
         esp_https_ota_handle_t https_ota_handle = nullptr;
         esp_err_t err = esp_https_ota_begin(&ota_config, &https_ota_handle);
@@ -264,17 +273,8 @@ namespace WetzelMesh
             if (err != ESP_ERR_HTTPS_OTA_IN_PROGRESS)
                 break;
             
-            // Atualiza progresso
-            int image_len_read = 0;
-            esp_https_ota_get_image_len_read(https_ota_handle, &image_len_read);
-            // Progresso aproximado (pode ser melhorado com content-length)
-            s_download_progress = (image_len_read * 100) / 1000000;  // Aproximado
-            if (s_download_progress > 100) s_download_progress = 100;
-            
-            if (s_download_progress % 10 == 0)  // Loga a cada 10%
-            {
-                ESP_LOGI(TAG, "Progresso: %d%%", s_download_progress);
-            }
+            // Pequeno delay para não sobrecarregar
+            vTaskDelay(pdMS_TO_TICKS(100));
         }
 
         if (err == ESP_OK)
@@ -293,29 +293,11 @@ namespace WetzelMesh
 
     bool OTAManager::install_firmware()
     {
-        // O esp_https_ota já instalou o firmware automaticamente
-        // Apenas verifica se foi instalado corretamente
-        const esp_partition_t *running = esp_ota_get_running_partition();
-        const esp_partition_t *update_partition = esp_ota_get_next_update_partition(nullptr);
+        // O esp_https_ota_finish já instalou o firmware automaticamente
+        // Apenas marca como válido para evitar rollback
+        esp_ota_mark_app_valid_cancel_rollback();
         
-        if (!update_partition)
-        {
-            ESP_LOGE(TAG, "Nenhuma partição de update disponível");
-            return false;
-        }
-
-        // Verifica se a partição de update foi configurada como boot
-        esp_ota_img_states_t ota_state;
-        if (esp_ota_get_state_partition(update_partition, &ota_state) == ESP_OK)
-        {
-            if (ota_state == ESP_OTA_IMG_PENDING_VERIFY)
-            {
-                ESP_LOGI(TAG, "Firmware instalado, marcando como válido...");
-                esp_ota_mark_app_valid_cancel_rollback();
-            }
-        }
-
-        ESP_LOGI(TAG, "Firmware instalado com sucesso na partição: %s", update_partition->label);
+        ESP_LOGI(TAG, "Firmware instalado e marcado como válido");
         return true;
     }
 

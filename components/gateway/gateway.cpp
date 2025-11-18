@@ -696,7 +696,7 @@ namespace WetzelMesh
                 ESP_LOGI(TAG, "TOKEN voltou ao Gateway de %s", pkt.route.src.c_str());
                 s_gateway_has_token = true;
                 // LED acende quando recebe token
-                LedManager::set_led_on_for_duration(CONFIG_WETZEL_TOKEN_HOLD_TIME_MS);
+                LedManager::set_led_on_for_duration(1000); // 1 segundo (padrão do teste)
                 continue;
             }
 #endif
@@ -876,7 +876,7 @@ namespace WetzelMesh
             // Se tem token, mantém por tempo configurado e depois passa
             if (s_gateway_has_token)
             {
-                uint32_t hold_time = CONFIG_WETZEL_TOKEN_HOLD_TIME_MS;
+                uint32_t hold_time = 1000; // 1 segundo (padrão do teste)
                 ESP_LOGI(TAG, "Gateway tem TOKEN - mantendo por %u ms", hold_time);
                 vTaskDelay(pdMS_TO_TICKS(hold_time));
                 
@@ -1064,9 +1064,25 @@ namespace WetzelMesh
         case HTTP_EVENT_DISCONNECTED:
             ESP_LOGI(TAG, "HTTP_EVENT_DISCONNECTED");
             // Em caso de desconexão antes de FINISH, limpa dados
+            // Mas só se ainda não foi deletado no ON_FINISH
             if (data)
             {
-                delete data;
+                // Verifica se o contexto ainda existe (se não existe, já foi processado)
+                auto ctx = HttpContextManager::instance().get_context(data->request_id);
+                if (!ctx)
+                {
+                    // Contexto já foi removido, então ON_FINISH já foi chamado e deletou data
+                    // Não deleta novamente
+                    data = nullptr;
+                }
+                else
+                {
+                    // Contexto ainda existe, então ON_FINISH não foi chamado
+                    // Remove contexto e deleta data
+                    HttpContextManager::instance().remove_context(data->request_id);
+                    delete data;
+                    data = nullptr;
+                }
             }
             break;
         default:
@@ -1148,16 +1164,20 @@ namespace WetzelMesh
             send_to_border(error_response);
             
             HttpContextManager::instance().remove_context(request_id);
+            
+            // Se houver erro, o callback pode não ser chamado, então deleta aqui
+            // Mas primeiro verifica se o callback já deletou (marca como nullptr)
+            if (callback_data)
+            {
+                delete callback_data;
+                callback_data = nullptr;
+            }
         }
         
         esp_http_client_cleanup(client);
         
-        // Nota: callback_data será deletado no callback HTTP_EVENT_ON_FINISH
-        // Se houver erro antes do callback, deleta aqui
-        if (err != ESP_OK && callback_data)
-        {
-            delete callback_data;
-        }
+        // callback_data será deletado no callback HTTP_EVENT_ON_FINISH ou HTTP_EVENT_DISCONNECTED
+        // Não deleta aqui para evitar double-free
         
         LedManager::blink(TrafficSource::SERVER);
         return (err == ESP_OK);

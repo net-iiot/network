@@ -52,9 +52,11 @@ namespace WetzelMesh
         
         // Processa pacote OTA recebido da rede mesh
         static void handle_ota_packet(const std::string &json);
+        
+        // Task OTA (precisa ser pública para o wrapper C)
+        static void ota_task(void *param);
 
     private:
-        static void ota_task(void *param);
         static bool download_firmware(const std::string &url);
         static bool install_firmware();
         static FirmwareVersion parse_version_info(const std::string &json);

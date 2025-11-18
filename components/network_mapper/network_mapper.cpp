@@ -39,7 +39,7 @@ namespace WetzelMesh
                 trigger_mapping();
                 vTaskDelete(nullptr);
             };
-            xTaskCreatePinnedToCore(initial_mapping, "init_map", 2048, nullptr, 3, nullptr, tskNO_AFFINITY);
+            xTaskCreatePinnedToCore(initial_mapping, "init_map", 4096, nullptr, 3, nullptr, tskNO_AFFINITY);
         }
     }
 
@@ -261,7 +261,7 @@ namespace WetzelMesh
             json += "\"from_node_id\":\"" + conn.from_node_id + "\",";
             json += "\"to_node_id\":\"" + conn.to_node_id + "\",";
             json += "\"rssi\":" + std::to_string(conn.rssi) + ",";
-            json += "\"is_direct\":" + (conn.is_direct ? "true" : "false") + ",";
+            json += "\"is_direct\":" + std::string(conn.is_direct ? "true" : "false") + ",";
             json += "\"last_communication_ms\":" + std::to_string(conn.last_communication_ms);
             json += "}";
         }

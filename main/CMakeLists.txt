@@ -6,6 +6,8 @@ idf_component_register(
         router
         protocol
         network_manager
+        network_mapper
+        ota_manager
         led_manager
         ble_transport
         espnow_transport

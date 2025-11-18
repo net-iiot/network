@@ -171,7 +171,7 @@ namespace WetzelMesh
     {
 #ifdef CONFIG_WETZEL_TEST_MODE
         ESP_LOGI(TAG, "Iniciando modo TESTE (Token Passing)...");
-        s_token_hold_time_ms = CONFIG_WETZEL_TOKEN_HOLD_TIME_MS;
+        s_token_hold_time_ms = 1000; // 1 segundo (padrão do teste)
         ESP_LOGI(TAG, "Tempo de token por node: %u ms", s_token_hold_time_ms);
         xTaskCreatePinnedToCore(token_passing_task, "token_test", 4096, nullptr, 5, nullptr, tskNO_AFFINITY);
 #else
