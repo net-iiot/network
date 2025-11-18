@@ -11,6 +11,9 @@
 #include "border_uart.hpp"
 #include "chunk_manager.hpp"
 #include "test_packet_generator.hpp"
+#include "network_mapper.hpp"
+#include "mbedtls/md5.h"
+#include <cstring>
 
 using namespace WetzelMesh;
 
@@ -18,12 +21,54 @@ static const char *TAG = "NETMAN";
 
 bool NetworkManager::s_gateway = false;
 std::vector<Neighbor> NetworkManager::s_neighbors;
+std::string NetworkManager::s_network_id = "";
+uint8_t NetworkManager::s_pmk[16] = {0};
 
 uint64_t NetworkManager::now_ms() { return esp_timer_get_time() / 1000ULL; }
+
+void NetworkManager::derive_pmk_from_network_id()
+{
+    if (s_network_id.empty())
+    {
+        ESP_LOGW(TAG, "Network ID vazio, usando PMK padrão");
+        memset(s_pmk, 0, 16);
+        return;
+    }
+    
+    // Usa MD5 do Network ID para gerar PMK de 16 bytes
+    mbedtls_md5_context ctx;
+    mbedtls_md5_init(&ctx);
+    mbedtls_md5_starts(&ctx);
+    mbedtls_md5_update(&ctx, 
+                      reinterpret_cast<const unsigned char*>(s_network_id.c_str()),
+                      s_network_id.length());
+    mbedtls_md5_finish(&ctx, s_pmk);
+    mbedtls_md5_free(&ctx);
+    
+    ESP_LOGI(TAG, "PMK derivado do Network ID '%s'", s_network_id.c_str());
+    ESP_LOGI(TAG, "PMK: %02X%02X%02X%02X...%02X%02X", 
+             s_pmk[0], s_pmk[1], s_pmk[2], s_pmk[3],
+             s_pmk[12], s_pmk[13], s_pmk[14], s_pmk[15]);
+}
 
 void NetworkManager::init(bool isGateway)
 {
     s_gateway = isGateway;
+    
+    // Carrega Network ID do menuconfig
+#ifdef CONFIG_WETZEL_NETWORK_ID
+    s_network_id = CONFIG_WETZEL_NETWORK_ID;
+#else
+    s_network_id = "rede-01";  // Fallback
+#endif
+    
+    // Deriva PMK do Network ID
+    derive_pmk_from_network_id();
+    
+    ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
+    ESP_LOGI(TAG, "Network ID: %s", s_network_id.c_str());
+    ESP_LOGI(TAG, "Canal WiFi: %u", get_wifi_channel());
+    ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
 
     if (s_gateway)
     {
@@ -47,6 +92,37 @@ void NetworkManager::init(bool isGateway)
         start_hello_task();
         ESP_LOGI(TAG, "INIT: NODE (mesh+BLE [+UART se borda])");
     }
+}
+
+std::string NetworkManager::get_network_id()
+{
+    return s_network_id;
+}
+
+const uint8_t* NetworkManager::get_pmk()
+{
+    return s_pmk;
+}
+
+uint8_t NetworkManager::get_wifi_channel()
+{
+#ifdef CONFIG_WETZEL_WIFI_CHANNEL
+    return CONFIG_WETZEL_WIFI_CHANNEL;
+#else
+    // Fallback: deriva do Network ID se não configurado
+    if (s_network_id.empty())
+        return 1;
+    
+    uint32_t hash = 0;
+    for (char c : s_network_id)
+    {
+        hash = hash * 31 + c;
+    }
+    
+    // Canais recomendados (1, 6, 11 não se sobrepõem)
+    uint8_t channels[] = {1, 6, 11, 2, 7, 12, 3, 8, 13, 4, 9, 5, 10};
+    return channels[hash % (sizeof(channels) / sizeof(channels[0]))];
+#endif
 }
 
 void NetworkManager::refresh_neighbors_task(void *param)
@@ -253,17 +329,46 @@ void NetworkManager::start_hello_task()
     xTaskCreatePinnedToCore(hello_task, "hello_task", 4096, nullptr, 4, nullptr, tskNO_AFFINITY);
 }
 
-void NetworkManager::on_hello(const std::string &node_id, int rssi)
+void NetworkManager::on_hello(const Protocol::Packet &hello_packet, int rssi)
 {
+    // Verifica Network ID - ignora nodes de outras redes
+    std::string received_network_id = hello_packet.topology.network_id;
+    if (!received_network_id.empty() && received_network_id != s_network_id)
+    {
+        ESP_LOGD(TAG, "HELLO ignorado: Network ID diferente (recebido: %s, esperado: %s)",
+                 received_network_id.c_str(), s_network_id.c_str());
+        return;  // Ignora nodes de outras redes
+    }
+    
+    const std::string &node_id = hello_packet.route.src;
     const uint64_t now = now_ms();
+    bool is_new_node = true;
+    
     for (auto &n : s_neighbors)
     {
         if (n.id == node_id)
         {
             n.last_seen_ms = now;
             n.rssi = rssi;
+            is_new_node = false;
             return;
         }
     }
-    s_neighbors.push_back({node_id, rssi, now});
+    
+    // Novo node detectado (da mesma rede)
+    if (is_new_node)
+    {
+        s_neighbors.push_back({node_id, rssi, now});
+        ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
+        ESP_LOGI(TAG, "NOVO NODE DETECTADO (Rede: %s): %s (RSSI: %d)", 
+                 s_network_id.c_str(), node_id.c_str(), rssi);
+        ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
+        
+        // Dispara mapeamento se for gateway
+        if (s_gateway)
+        {
+            ESP_LOGI(TAG, "Disparando mapeamento devido a novo node detectado...");
+            NetworkMapper::trigger_mapping();
+        }
+    }
 }

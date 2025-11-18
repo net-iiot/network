@@ -4,6 +4,7 @@
 #include "driver/uart.h"
 #include "protocol.hpp"
 #include "network_manager.hpp"
+#include "network_mapper.hpp"
 #include "esp_bt.h"
 #include "led_manager.hpp"
 #include "freertos/FreeRTOS.h"
@@ -677,6 +678,14 @@ namespace WetzelMesh
                     ESP_LOGE(TAG, "Falha ao enviar PONG!");
                 }
                 ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
+                continue;
+            }
+
+            // Processa resposta DISCOVERY_RESPONSE (mapeamento)
+            if (pkt.type == Protocol::PacketType::RESPONSE && pkt.method == "DISCOVERY_RESPONSE")
+            {
+                ESP_LOGI(TAG, "Resposta DISCOVERY recebida via UART de %s", pkt.route.src.c_str());
+                NetworkMapper::on_discovery_response(pkt);
                 continue;
             }
 

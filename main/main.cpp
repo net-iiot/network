@@ -12,6 +12,8 @@
 #include "network_manager.hpp"
 #include "test_packet_generator.hpp"
 #include "gateway.hpp"
+#include "network_mapper.hpp"
+#include "ota_manager.hpp"
 
 using namespace WetzelMesh;
 
@@ -101,6 +103,26 @@ extern "C" void app_main(void)
     }
     
     NetworkManager::init(kIsGateway); // se gateway: BLE/ESPNOW OFF, só Gateway::init()
+    
+    // Inicializa mapeador de rede (apenas gateway faz mapeamento ativo)
+    NetworkMapper::init(kIsGateway);
+    if (kIsGateway)
+    {
+        // Configura mapeamento periódico a cada 60 segundos (opcional)
+        // NetworkMapper::set_periodic_mapping(60);
+        ESP_LOGI(TAG, "NetworkMapper configurado no gateway");
+    }
+    
+    // Inicializa OTA Manager
+#ifdef CONFIG_WETZEL_GATEWAY_SERVER_URL
+    OTAManager::init(kIsGateway, CONFIG_WETZEL_GATEWAY_SERVER_URL);
+#else
+    OTAManager::init(kIsGateway, "");
+#endif
+    if (kIsGateway)
+    {
+        ESP_LOGI(TAG, "OTA Manager configurado no gateway");
+    }
 
     // Geração de pacotes de teste a cada 1s (mantive seu nome de função)
     // Gateway: gera e envia via UART -> borda -> mesh

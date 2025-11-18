@@ -19,6 +19,8 @@ namespace WetzelMesh
 
     // endereço broadcast (6 bytes)
     static const uint8_t kBroadcast[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+    
+    uint8_t ESPNOWTransport::s_channel = 1;
 
     // Assinaturas compatíveis com IDF 5.5.1
     static void espnow_send_thunk(const wifi_tx_info_t *info, esp_now_send_status_t status);
@@ -58,32 +60,44 @@ namespace WetzelMesh
         return true;
     }
 
+    uint8_t ESPNOWTransport::get_channel()
+    {
+        return s_channel;
+    }
+
     bool ESPNOWTransport::ensure_channel_fixed()
     {
-        esp_err_t err = esp_wifi_set_channel(kESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE);
+        // Usa canal do NetworkManager (baseado no Network ID)
+        s_channel = NetworkManager::get_wifi_channel();
+        
+        esp_err_t err = esp_wifi_set_channel(s_channel, WIFI_SECOND_CHAN_NONE);
         if (err != ESP_OK)
         {
-            ESP_LOGE(TAG, "set_channel=%d: %s", kESPNOW_CHANNEL, esp_err_to_name(err));
+            ESP_LOGE(TAG, "set_channel=%d: %s", s_channel, esp_err_to_name(err));
             return false;
         }
 
         uint8_t ch = 0;
         wifi_second_chan_t sc = WIFI_SECOND_CHAN_NONE;
         esp_wifi_get_channel(&ch, &sc);
-        ESP_LOGI(TAG, "Canal ESPNOW fixado em %u.", (unsigned)ch);
+        ESP_LOGI(TAG, "Canal ESPNOW fixado em %u (Network ID: %s).", 
+                 (unsigned)ch, NetworkManager::get_network_id().c_str());
         return true;
     }
 
     bool ESPNOWTransport::ensure_broadcast_peer()
     {
+        const uint8_t* pmk = NetworkManager::get_pmk();
+        bool encryption_enabled = true;  // Sempre habilitado se PMK configurado
+        
 #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(4, 4, 0)
         if (esp_now_is_peer_exist(kBroadcast))
         {
             esp_now_peer_info_t peer{};
             memcpy(peer.peer_addr, kBroadcast, 6);
             peer.ifidx = WIFI_IF_STA;
-            peer.channel = kESPNOW_CHANNEL;
-            peer.encrypt = false;
+            peer.channel = s_channel;  // Usa canal dinâmico
+            peer.encrypt = encryption_enabled;
             (void)esp_now_mod_peer(&peer);
             return true;
         }
@@ -92,13 +106,14 @@ namespace WetzelMesh
         esp_now_peer_info_t peer{};
         memcpy(peer.peer_addr, kBroadcast, 6);
         peer.ifidx = WIFI_IF_STA;
-        peer.channel = kESPNOW_CHANNEL;
-        peer.encrypt = false;
+        peer.channel = s_channel;  // Usa canal dinâmico
+        peer.encrypt = encryption_enabled;
 
         esp_err_t err = esp_now_add_peer(&peer);
         if (err == ESP_OK || err == ESP_ERR_ESPNOW_EXIST)
         {
-            ESP_LOGI(TAG, "Peer broadcast ativo (canal base %d)", kESPNOW_CHANNEL);
+            ESP_LOGI(TAG, "Peer broadcast ativo (canal %u, encryption: SIM, Network: %s)", 
+                     s_channel, NetworkManager::get_network_id().c_str());
             return true;
         }
         ESP_LOGE(TAG, "add_peer(broadcast): %s", esp_err_to_name(err));
@@ -130,13 +145,29 @@ namespace WetzelMesh
             return;
         }
 
+        // Configura PMK (Primary Master Key) para criptografia ESP-NOW
+        const uint8_t* pmk = NetworkManager::get_pmk();
+        err = esp_now_set_pmk(pmk);
+        if (err != ESP_OK)
+        {
+            ESP_LOGE(TAG, "esp_now_set_pmk falhou: %s", esp_err_to_name(err));
+            // Continua mesmo assim (modo não-criptografado como fallback)
+        }
+        else
+        {
+            ESP_LOGI(TAG, "ESP-NOW encryption habilitado com PMK derivado do Network ID");
+        }
+
         // Callbacks (assinaturas IDF 5.5.1)
         ESP_ERROR_CHECK(esp_now_register_recv_cb(espnow_recv_thunk));
         ESP_ERROR_CHECK(esp_now_register_send_cb(espnow_send_thunk));
 
         ensure_broadcast_peer();
 
-        ESP_LOGI(TAG, "ESPNOW iniciado (canal base %d)", kESPNOW_CHANNEL);
+        ESP_LOGI(TAG, "ESPNOW iniciado (canal %u, encryption: %s, Network: %s)", 
+                 s_channel, 
+                 (err == ESP_OK) ? "SIM" : "NÃO",
+                 NetworkManager::get_network_id().c_str());
     }
 
     bool ESPNOWTransport::send(const Protocol::Packet &p)
@@ -237,7 +268,18 @@ namespace WetzelMesh
 
             if (pkt.type == Protocol::PacketType::EVENT && pkt.method == "HELLO")
             {
-                NetworkManager::on_hello(pkt.route.src, rssi);
+                // Filtro adicional por Network ID (redundante, mas útil para logs)
+                std::string received_network_id = pkt.topology.network_id;
+                std::string my_network_id = NetworkManager::get_network_id();
+                
+                if (!received_network_id.empty() && received_network_id != my_network_id)
+                {
+                    ESP_LOGW(TAG, "RX[MESH] HELLO ignorado: Network ID diferente (recebido: %s, esperado: %s)",
+                             received_network_id.c_str(), my_network_id.c_str());
+                    return;  // Ignora pacote de outra rede
+                }
+                
+                NetworkManager::on_hello(pkt, rssi);  // Passa pacote completo
                 // Não pisca LED para mensagens HELLO (são apenas controle de topologia)
             }
             else

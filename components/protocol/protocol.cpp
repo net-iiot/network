@@ -183,6 +183,7 @@ namespace WetzelMesh::Protocol
         {
             cJSON *jnode_id = cJSON_GetObjectItem(jtopology, "node_id");
             cJSON *jnode_name = cJSON_GetObjectItem(jtopology, "node_name");
+            cJSON *jnetwork_id = cJSON_GetObjectItem(jtopology, "network_id");
             cJSON *jneighbors = cJSON_GetObjectItem(jtopology, "neighbors");
             cJSON *jhas_gateway = cJSON_GetObjectItem(jtopology, "has_gateway");
             cJSON *jgateway_id = cJSON_GetObjectItem(jtopology, "gateway_id");
@@ -193,6 +194,8 @@ namespace WetzelMesh::Protocol
                 out.topology.node_id = jnode_id->valuestring;
             if (jnode_name && cJSON_IsString(jnode_name))
                 out.topology.node_name = jnode_name->valuestring;
+            if (jnetwork_id && cJSON_IsString(jnetwork_id))
+                out.topology.network_id = jnetwork_id->valuestring;
             if (jhas_gateway && cJSON_IsBool(jhas_gateway))
                 out.topology.has_gateway = cJSON_IsTrue(jhas_gateway);
             if (jgateway_id && cJSON_IsString(jgateway_id))
@@ -411,14 +414,16 @@ namespace WetzelMesh::Protocol
 
         // Serializar topologia
         if (!p.topology.node_id.empty() || !p.topology.neighbors.empty() || p.topology.has_gateway || 
-            !p.topology.node_name.empty() || !p.topology.connectivity.connections.empty() ||
-            !p.topology.node_info.node_id.empty())
+            !p.topology.node_name.empty() || !p.topology.network_id.empty() || 
+            !p.topology.connectivity.connections.empty() || !p.topology.node_info.node_id.empty())
         {
             cJSON *topology = cJSON_CreateObject();
             if (!p.topology.node_id.empty())
                 cJSON_AddStringToObject(topology, "node_id", p.topology.node_id.c_str());
             if (!p.topology.node_name.empty())
                 cJSON_AddStringToObject(topology, "node_name", p.topology.node_name.c_str());
+            if (!p.topology.network_id.empty())
+                cJSON_AddStringToObject(topology, "network_id", p.topology.network_id.c_str());
             cJSON_AddBoolToObject(topology, "has_gateway", p.topology.has_gateway);
             if (!p.topology.gateway_id.empty())
                 cJSON_AddStringToObject(topology, "gateway_id", p.topology.gateway_id.c_str());

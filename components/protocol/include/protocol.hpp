@@ -85,6 +85,7 @@ namespace WetzelMesh::Protocol
     {
         std::string node_id;                    // ID deste nó
         std::string node_name;                  // Nome do node (ex: "Sala 1", "Corredor")
+        std::string network_id;                 // ID da rede (ex: "rede-01", "rede-02") - para isolamento
         std::vector<NeighborInfo> neighbors;     // Lista de vizinhos conectados
         bool has_gateway = false;               // Se tem gateway conectado via UART
         std::string gateway_id;                 // ID do gateway (se houver)

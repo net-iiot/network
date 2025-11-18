@@ -73,6 +73,35 @@ config WETZEL_TOKEN_HOLD_TIME_MS
 
 endmenu
 
+menu "Isolamento de Rede"
+    help
+      Configure o isolamento de redes mesh. Nodes só se conectam a outros nodes
+      com o mesmo Network ID, canal WiFi e chave de criptografia.
+
+config WETZEL_NETWORK_ID
+    string "Network ID (identificador da rede)"
+    default "rede-01"
+    help
+      Identificador único da rede mesh. Nodes só se conectam a outros nodes
+      com o mesmo Network ID. A chave de criptografia ESP-NOW é derivada
+      deste ID, garantindo isolamento total entre redes.
+      IMPORTANTE: Todos os nodes da mesma rede física devem ter o mesmo Network ID.
+
+config WETZEL_WIFI_CHANNEL
+    int "Canal WiFi para ESP-NOW (1-13)"
+    default 1
+    range 1 13
+    help
+      Canal WiFi usado para comunicação ESP-NOW.
+      IMPORTANTE: Todos os nodes da mesma rede devem usar o mesmo canal.
+      Recomendado: 1, 6 ou 11 (não se sobrepõem).
+      Para múltiplas redes, use canais diferentes:
+      - Rede 1: canal 1
+      - Rede 2: canal 6
+      - Rede 3: canal 11
+
+endmenu
+
 menu "Credenciais de Rede"
     depends on WM_ROLE_GATEWAY
     help

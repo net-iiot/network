@@ -1,0 +1,71 @@
+#pragma once
+#include <string>
+#include <stdint.h>
+#include <functional>
+
+namespace WetzelMesh
+{
+    // Status do OTA
+    enum class OTAStatus
+    {
+        IDLE,           // Nenhuma atualização em andamento
+        CHECKING,       // Verificando nova versão
+        DOWNLOADING,    // Baixando novo firmware
+        INSTALLING,     // Instalando novo firmware
+        SUCCESS,        // Atualização concluída com sucesso
+        FAILED          // Falha na atualização
+    };
+
+    // Informações de versão do firmware
+    struct FirmwareVersion
+    {
+        std::string version;      // Versão (ex: "1.0.0")
+        std::string build_date;   // Data de build
+        uint32_t build_number;    // Número de build
+        std::string hash;         // Hash do firmware
+    };
+
+    class OTAManager
+    {
+    public:
+        // Inicializa o OTA Manager
+        static void init(bool isGateway, const std::string &server_url = "");
+        
+        // Verifica se há nova versão disponível
+        static void check_for_update();
+        
+        // Inicia download e instalação de nova versão
+        static void start_update(const std::string &firmware_url);
+        
+        // Obtém status atual do OTA
+        static OTAStatus get_status();
+        
+        // Obtém versão atual do firmware
+        static FirmwareVersion get_current_version();
+        
+        // Obtém progresso do download (0-100)
+        static int get_download_progress();
+        
+        // Callback para notificar mudanças de status
+        using StatusCallback = std::function<void(OTAStatus, const std::string &)>;
+        static void set_status_callback(StatusCallback cb);
+        
+        // Processa pacote OTA recebido da rede mesh
+        static void handle_ota_packet(const std::string &json);
+
+    private:
+        static void ota_task(void *param);
+        static bool download_firmware(const std::string &url);
+        static bool install_firmware();
+        static FirmwareVersion parse_version_info(const std::string &json);
+        static std::string get_version_string();
+        
+        static bool s_isGateway;
+        static std::string s_server_url;
+        static OTAStatus s_status;
+        static int s_download_progress;
+        static FirmwareVersion s_current_version;
+        static StatusCallback s_status_callback;
+    };
+}
+
