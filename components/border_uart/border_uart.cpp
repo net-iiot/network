@@ -3,6 +3,8 @@
 #include "esp_log.h"
 #include "protocol.hpp"
 #include "led_manager.hpp"
+#include "ble_transport.hpp"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "espnow_transport.hpp"
@@ -352,17 +354,49 @@ namespace WetzelMesh
                      pkt.route.src.c_str(), pkt.route.dst.c_str(), len);
             LedManager::blink(TrafficSource::UART); // LED pisca quando recebe do UART
 
+            // Atualizar informações de rastreabilidade
+            Protocol::Packet updated_pkt = pkt; // Cópia para modificar
+            std::string current_node_id = BLETransport::node_id();
+            uint64_t now_ms = esp_timer_get_time() / 1000ULL;
+            
+            // Adicionar border node ao path
+            bool already_in_path = false;
+            for (const auto &node : updated_pkt.trace.path)
+            {
+                if (node == current_node_id || node == "border")
+                {
+                    already_in_path = true;
+                    break;
+                }
+            }
+            
+            if (!already_in_path)
+            {
+                updated_pkt.trace.path.push_back(current_node_id);
+                updated_pkt.trace.hop_count++;
+            }
+            
+            updated_pkt.trace.received_at_ms = now_ms;
+            
+            // Adicionar hop ao histórico
+            Protocol::HopInfo hop;
+            hop.node_id = current_node_id;
+            hop.node_name = ""; // Pode ser preenchido pelo microserviço
+            hop.timestamp_ms = now_ms;
+            hop.transport = "UART";
+            updated_pkt.trace.hop_history.push_back(hop);
+
             // Processa TOKEN (modo teste) - token do gateway via UART
 #ifdef CONFIG_WETZEL_TEST_MODE
-            if (pkt.type == Protocol::PacketType::EVENT && pkt.method == "TOKEN")
+            if (updated_pkt.type == Protocol::PacketType::EVENT && updated_pkt.method == "TOKEN")
             {
                 // Token do gateway - passa para a mesh
-                if (pkt.route.dst == "border" || pkt.route.dst.empty())
+                if (updated_pkt.route.dst == "border" || updated_pkt.route.dst.empty())
                 {
                     // Se não tem destino específico, passa para primeiro vizinho ou processa localmente
                     ESP_LOGI(TAG, "TOKEN recebido do Gateway via UART - processando...");
                     if (s_rx_handler)
-                        s_rx_handler(pkt);
+                        s_rx_handler(updated_pkt);
                     return;
                 }
             }
@@ -370,17 +404,20 @@ namespace WetzelMesh
 
             // Reencaminha TODOS os pacotes recebidos do UART para a rede mesh
             // Border node aguarda 1 segundo antes de repassar (com LED aceso)
-            if (pkt.route.dst == "border" || pkt.route.dst == "broadcast" || pkt.route.dst.empty())
+            if (updated_pkt.route.dst == "border" || updated_pkt.route.dst == "broadcast" || updated_pkt.route.dst.empty())
             {
                 // Border node recebeu dado do UART - mantém LED aceso durante 1 segundo antes de repassar
-                ESP_LOGI(TAG, "Border node recebeu dado do UART - mantendo LED aceso por 1 segundo antes de repassar...");
+                ESP_LOGI(TAG, "Border node %s recebeu dado do UART (hop %u) - mantendo LED aceso por 1 segundo antes de repassar...", 
+                         current_node_id.c_str(), updated_pkt.trace.hop_count);
                 LedManager::set_led_on_for_duration(1000); // Mantém LED aceso por 1 segundo
                 vTaskDelay(pdMS_TO_TICKS(1000)); // Aguarda 1 segundo
                 
-                ESP_LOGI(TAG, "→ Reencaminhando pacote UART->MESH após 1 segundo: method=%s", pkt.method.c_str());
-                ESPNOWTransport::send(pkt);
+                ESP_LOGI(TAG, "→ Reencaminhando pacote UART->MESH após 1 segundo: method=%s", updated_pkt.method.c_str());
+                ESPNOWTransport::send(updated_pkt);
                 LedManager::blink(TrafficSource::MESH); // LED pisca quando envia para a rede
             }
+            
+            pkt = updated_pkt; // Atualizar pkt original para o handler
 
             if (s_rx_handler)
                 s_rx_handler(pkt);

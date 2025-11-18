@@ -242,6 +242,14 @@ namespace WetzelMesh
             }
             else
             {
+                // Atualizar informações de rastreabilidade com RSSI recebido
+                // (O router vai atualizar o path e hop_count, mas aqui já temos o RSSI)
+                if (!pkt.trace.hop_history.empty())
+                {
+                    // Atualizar RSSI do último hop (que foi o que enviou)
+                    pkt.trace.hop_history.back().rssi = rssi;
+                }
+                
                 // Só pisca LED para dados reais (não HELLO)
                 Router::handle_packet(pkt);
                 LedManager::blink(TrafficSource::MESH);

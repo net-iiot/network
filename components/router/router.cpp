@@ -4,6 +4,8 @@
 #include "network_manager.hpp"
 #include "led_manager.hpp"
 #include "espnow_transport.hpp"
+#include "ble_transport.hpp"
+#include "esp_timer.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -43,14 +45,58 @@ namespace WetzelMesh
         if (pkt.route.dst == "gateway" || pkt.route.dst == "broadcast" || 
             (pkt.type == Protocol::PacketType::EVENT && pkt.method == "DATA"))
         {
+            // Atualizar informações de rastreabilidade
+            Protocol::Packet updated_pkt = pkt; // Cópia para modificar
+            std::string current_node_id = BLETransport::node_id();
+            uint64_t now_ms = esp_timer_get_time() / 1000ULL;
+            
+            // Verificar TTL para evitar loops
+            if (updated_pkt.ttl > 0)
+            {
+                updated_pkt.ttl--;
+            }
+            else
+            {
+                ESP_LOGW(TAG, "TTL expirado, descartando pacote");
+                return;
+            }
+            
+            // Adicionar este node ao path se ainda não estiver
+            bool already_in_path = false;
+            for (const auto &node : updated_pkt.trace.path)
+            {
+                if (node == current_node_id)
+                {
+                    already_in_path = true;
+                    break;
+                }
+            }
+            
+            if (!already_in_path)
+            {
+                updated_pkt.trace.path.push_back(current_node_id);
+                updated_pkt.trace.hop_count++;
+            }
+            
+            updated_pkt.trace.received_at_ms = now_ms;
+            
+            // Adicionar hop ao histórico
+            Protocol::HopInfo hop;
+            hop.node_id = current_node_id;
+            hop.node_name = ""; // Pode ser preenchido pelo microserviço
+            hop.timestamp_ms = now_ms;
+            hop.transport = "MESH";
+            updated_pkt.trace.hop_history.push_back(hop);
+            
             // Node recebeu dado da mesh - mantém LED aceso durante 1 segundo antes de repassar
-            ESP_LOGI(TAG, "Node recebeu dado da mesh - mantendo LED aceso por 1 segundo antes de repassar...");
+            ESP_LOGI(TAG, "Node %s recebeu dado da mesh (hop %u) - mantendo LED aceso por 1 segundo antes de repassar...", 
+                     current_node_id.c_str(), updated_pkt.trace.hop_count);
             LedManager::set_led_on_for_duration(1000); // Mantém LED aceso por 1 segundo
             vTaskDelay(pdMS_TO_TICKS(1000)); // Aguarda 1 segundo
             
             // Envia pela malha; lógica "borda→UART" agora está em NetworkManager::send()
             ESP_LOGI(TAG, "Repassando dado após 1 segundo...");
-            ESPNOWTransport::send(pkt);
+            ESPNOWTransport::send(updated_pkt);
             return;
         }
 

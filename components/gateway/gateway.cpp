@@ -14,6 +14,7 @@
 #include "esp_event.h"
 #include "lwip/ip4_addr.h"
 #include "nvs_flash.h"
+#include "esp_timer.h"
 #include <string>
 #include <queue>
 #include <mutex>
@@ -916,8 +917,26 @@ namespace WetzelMesh
                        ",\"hum\":" + std::to_string(50 + (std::rand() % 20)) +
                        ",\"seq\":" + std::to_string(seq++) + "}";
 
+            // Preencher informações de rastreabilidade
+            uint64_t now_ms = esp_timer_get_time() / 1000ULL;
+            pkt.trace.packet_id = Protocol::generate_packet_id();
+            pkt.trace.created_at_ms = now_ms;
+            pkt.trace.path.push_back("gateway"); // Inicia o caminho
+            pkt.trace.hop_count = 0;
+            pkt.routing_strategy = "flooding";
+            pkt.ttl = 10;
+
+            // Adicionar hop inicial do gateway
+            Protocol::HopInfo gateway_hop;
+            gateway_hop.node_id = "gateway";
+            gateway_hop.node_name = "Gateway Principal";
+            gateway_hop.timestamp_ms = now_ms;
+            gateway_hop.transport = "UART";
+            pkt.trace.hop_history.push_back(gateway_hop);
+
             ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
             ESP_LOGI(TAG, "Gateway gerando e enviando dado #%d: %s", seq, pkt.body.c_str());
+            ESP_LOGI(TAG, "Packet ID: %s", pkt.trace.packet_id.c_str());
             ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
 
             // ⚠️ Usa API pública, mantendo uart_write_json privada:

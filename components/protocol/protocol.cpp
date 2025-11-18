@@ -59,6 +59,10 @@ namespace WetzelMesh::Protocol
         cJSON *jchunk_total = cJSON_GetObjectItem(root, "chunk_total");
         cJSON *jchunk_index = cJSON_GetObjectItem(root, "chunk_index");
         cJSON *jtopology = cJSON_GetObjectItem(root, "topology");
+        cJSON *jtrace = cJSON_GetObjectItem(root, "trace");
+        cJSON *jnext_hop = cJSON_GetObjectItem(root, "next_hop");
+        cJSON *jrouting_strategy = cJSON_GetObjectItem(root, "routing_strategy");
+        cJSON *jttl = cJSON_GetObjectItem(root, "ttl");
 
         if (!cJSON_IsString(jtype) || !cJSON_IsString(jsrc) || !cJSON_IsString(jdst))
         {
@@ -105,16 +109,90 @@ namespace WetzelMesh::Protocol
             }
         }
 
+        // Parse de metadados de roteamento
+        if (jnext_hop && cJSON_IsString(jnext_hop))
+            out.next_hop = jnext_hop->valuestring;
+        if (jrouting_strategy && cJSON_IsString(jrouting_strategy))
+            out.routing_strategy = jrouting_strategy->valuestring;
+        if (jttl && cJSON_IsNumber(jttl))
+            out.ttl = jttl->valuedouble;
+
+        // Parse de trace
+        if (jtrace && cJSON_IsObject(jtrace))
+        {
+            cJSON *jpath = cJSON_GetObjectItem(jtrace, "path");
+            cJSON *jhop_count = cJSON_GetObjectItem(jtrace, "hop_count");
+            cJSON *jcreated_at = cJSON_GetObjectItem(jtrace, "created_at_ms");
+            cJSON *jreceived_at = cJSON_GetObjectItem(jtrace, "received_at_ms");
+            cJSON *jpacket_id = cJSON_GetObjectItem(jtrace, "packet_id");
+            cJSON *jhop_history = cJSON_GetObjectItem(jtrace, "hop_history");
+
+            if (jpath && cJSON_IsArray(jpath))
+            {
+                int size = cJSON_GetArraySize(jpath);
+                for (int i = 0; i < size; i++)
+                {
+                    cJSON *item = cJSON_GetArrayItem(jpath, i);
+                    if (item && cJSON_IsString(item))
+                        out.trace.path.push_back(item->valuestring);
+                }
+            }
+            if (jhop_count && cJSON_IsNumber(jhop_count))
+                out.trace.hop_count = jhop_count->valuedouble;
+            if (jcreated_at && cJSON_IsNumber(jcreated_at))
+                out.trace.created_at_ms = jcreated_at->valuedouble;
+            if (jreceived_at && cJSON_IsNumber(jreceived_at))
+                out.trace.received_at_ms = jreceived_at->valuedouble;
+            if (jpacket_id && cJSON_IsString(jpacket_id))
+                out.trace.packet_id = jpacket_id->valuestring;
+
+            if (jhop_history && cJSON_IsArray(jhop_history))
+            {
+                int size = cJSON_GetArraySize(jhop_history);
+                for (int i = 0; i < size; i++)
+                {
+                    cJSON *hop = cJSON_GetArrayItem(jhop_history, i);
+                    if (hop && cJSON_IsObject(hop))
+                    {
+                        HopInfo hop_info;
+                        cJSON *jnode_id = cJSON_GetObjectItem(hop, "node_id");
+                        cJSON *jnode_name = cJSON_GetObjectItem(hop, "node_name");
+                        cJSON *jtimestamp = cJSON_GetObjectItem(hop, "timestamp_ms");
+                        cJSON *jrssi = cJSON_GetObjectItem(hop, "rssi");
+                        cJSON *jtransport = cJSON_GetObjectItem(hop, "transport");
+
+                        if (jnode_id && cJSON_IsString(jnode_id))
+                            hop_info.node_id = jnode_id->valuestring;
+                        if (jnode_name && cJSON_IsString(jnode_name))
+                            hop_info.node_name = jnode_name->valuestring;
+                        if (jtimestamp && cJSON_IsNumber(jtimestamp))
+                            hop_info.timestamp_ms = jtimestamp->valuedouble;
+                        if (jrssi && cJSON_IsNumber(jrssi))
+                            hop_info.rssi = jrssi->valuedouble;
+                        if (jtransport && cJSON_IsString(jtransport))
+                            hop_info.transport = jtransport->valuestring;
+
+                        out.trace.hop_history.push_back(hop_info);
+                    }
+                }
+            }
+        }
+
         // Parse de topologia
         if (jtopology && cJSON_IsObject(jtopology))
         {
             cJSON *jnode_id = cJSON_GetObjectItem(jtopology, "node_id");
+            cJSON *jnode_name = cJSON_GetObjectItem(jtopology, "node_name");
             cJSON *jneighbors = cJSON_GetObjectItem(jtopology, "neighbors");
             cJSON *jhas_gateway = cJSON_GetObjectItem(jtopology, "has_gateway");
             cJSON *jgateway_id = cJSON_GetObjectItem(jtopology, "gateway_id");
+            cJSON *jconnectivity = cJSON_GetObjectItem(jtopology, "connectivity");
+            cJSON *jnode_info = cJSON_GetObjectItem(jtopology, "node_info");
 
             if (jnode_id && cJSON_IsString(jnode_id))
                 out.topology.node_id = jnode_id->valuestring;
+            if (jnode_name && cJSON_IsString(jnode_name))
+                out.topology.node_name = jnode_name->valuestring;
             if (jhas_gateway && cJSON_IsBool(jhas_gateway))
                 out.topology.has_gateway = cJSON_IsTrue(jhas_gateway);
             if (jgateway_id && cJSON_IsString(jgateway_id))
@@ -141,6 +219,99 @@ namespace WetzelMesh::Protocol
                             nbr.last_seen_ms = jlast_seen->valuedouble;
 
                         out.topology.neighbors.push_back(nbr);
+                    }
+                }
+            }
+
+            // Parse de connectivity matrix
+            if (jconnectivity && cJSON_IsObject(jconnectivity))
+            {
+                cJSON *jconnections = cJSON_GetObjectItem(jconnectivity, "connections");
+                if (jconnections && cJSON_IsArray(jconnections))
+                {
+                    int size = cJSON_GetArraySize(jconnections);
+                    for (int i = 0; i < size; i++)
+                    {
+                        cJSON *conn = cJSON_GetArrayItem(jconnections, i);
+                        if (conn && cJSON_IsObject(conn))
+                        {
+                            Connection connection;
+                            cJSON *jfrom = cJSON_GetObjectItem(conn, "from_node_id");
+                            cJSON *jto = cJSON_GetObjectItem(conn, "to_node_id");
+                            cJSON *jrssi = cJSON_GetObjectItem(conn, "rssi");
+                            cJSON *jlast_comm = cJSON_GetObjectItem(conn, "last_communication_ms");
+                            cJSON *jpacket_count = cJSON_GetObjectItem(conn, "packet_count");
+                            cJSON *jis_direct = cJSON_GetObjectItem(conn, "is_direct");
+
+                            if (jfrom && cJSON_IsString(jfrom))
+                                connection.from_node_id = jfrom->valuestring;
+                            if (jto && cJSON_IsString(jto))
+                                connection.to_node_id = jto->valuestring;
+                            if (jrssi && cJSON_IsNumber(jrssi))
+                                connection.rssi = jrssi->valuedouble;
+                            if (jlast_comm && cJSON_IsNumber(jlast_comm))
+                                connection.last_communication_ms = jlast_comm->valuedouble;
+                            if (jpacket_count && cJSON_IsNumber(jpacket_count))
+                                connection.packet_count = jpacket_count->valuedouble;
+                            if (jis_direct && cJSON_IsBool(jis_direct))
+                                connection.is_direct = cJSON_IsTrue(jis_direct);
+
+                            out.topology.connectivity.connections.push_back(connection);
+                        }
+                    }
+                }
+            }
+
+            // Parse de node_info
+            if (jnode_info && cJSON_IsObject(jnode_info))
+            {
+                cJSON *jnode_id = cJSON_GetObjectItem(jnode_info, "node_id");
+                cJSON *jnode_name = cJSON_GetObjectItem(jnode_info, "node_name");
+                cJSON *jnode_type = cJSON_GetObjectItem(jnode_info, "node_type");
+                cJSON *jcapabilities = cJSON_GetObjectItem(jnode_info, "capabilities");
+                cJSON *jfirst_seen = cJSON_GetObjectItem(jnode_info, "first_seen_ms");
+                cJSON *jlast_seen = cJSON_GetObjectItem(jnode_info, "last_seen_ms");
+                cJSON *jbattery = cJSON_GetObjectItem(jnode_info, "battery_level");
+                cJSON *jpos_x = cJSON_GetObjectItem(jnode_info, "position_x");
+                cJSON *jpos_y = cJSON_GetObjectItem(jnode_info, "position_y");
+                cJSON *jmetadata = cJSON_GetObjectItem(jnode_info, "metadata");
+
+                if (jnode_id && cJSON_IsString(jnode_id))
+                    out.topology.node_info.node_id = jnode_id->valuestring;
+                if (jnode_name && cJSON_IsString(jnode_name))
+                    out.topology.node_info.node_name = jnode_name->valuestring;
+                if (jnode_type && cJSON_IsString(jnode_type))
+                    out.topology.node_info.node_type = jnode_type->valuestring;
+                if (jfirst_seen && cJSON_IsNumber(jfirst_seen))
+                    out.topology.node_info.first_seen_ms = jfirst_seen->valuedouble;
+                if (jlast_seen && cJSON_IsNumber(jlast_seen))
+                    out.topology.node_info.last_seen_ms = jlast_seen->valuedouble;
+                if (jbattery && cJSON_IsNumber(jbattery))
+                    out.topology.node_info.battery_level = jbattery->valuedouble;
+                if (jpos_x && cJSON_IsNumber(jpos_x))
+                    out.topology.node_info.position_x = jpos_x->valuedouble;
+                if (jpos_y && cJSON_IsNumber(jpos_y))
+                    out.topology.node_info.position_y = jpos_y->valuedouble;
+
+                if (jcapabilities && cJSON_IsArray(jcapabilities))
+                {
+                    int size = cJSON_GetArraySize(jcapabilities);
+                    for (int i = 0; i < size; i++)
+                    {
+                        cJSON *cap = cJSON_GetArrayItem(jcapabilities, i);
+                        if (cap && cJSON_IsString(cap))
+                            out.topology.node_info.capabilities.push_back(cap->valuestring);
+                    }
+                }
+
+                if (jmetadata && cJSON_IsObject(jmetadata))
+                {
+                    cJSON *item = jmetadata->child;
+                    while (item)
+                    {
+                        if (cJSON_IsString(item))
+                            out.topology.node_info.metadata[item->string] = item->valuestring;
+                        item = item->next;
                     }
                 }
             }
@@ -185,12 +356,69 @@ namespace WetzelMesh::Protocol
             cJSON_AddStringToObject(root, "body", p.body.c_str());
         }
 
+        // Serializar metadados de roteamento
+        if (!p.next_hop.empty())
+            cJSON_AddStringToObject(root, "next_hop", p.next_hop.c_str());
+        if (!p.routing_strategy.empty())
+            cJSON_AddStringToObject(root, "routing_strategy", p.routing_strategy.c_str());
+        if (p.ttl != 10) // Só adiciona se diferente do padrão
+            cJSON_AddNumberToObject(root, "ttl", p.ttl);
+
+        // Serializar trace
+        if (!p.trace.path.empty() || p.trace.hop_count > 0 || p.trace.created_at_ms > 0 || !p.trace.packet_id.empty())
+        {
+            cJSON *trace = cJSON_CreateObject();
+            
+            if (!p.trace.path.empty())
+            {
+                cJSON *path = cJSON_CreateArray();
+                for (const auto &node : p.trace.path)
+                {
+                    cJSON_AddItemToArray(path, cJSON_CreateString(node.c_str()));
+                }
+                cJSON_AddItemToObject(trace, "path", path);
+            }
+            
+            if (p.trace.hop_count > 0)
+                cJSON_AddNumberToObject(trace, "hop_count", p.trace.hop_count);
+            if (p.trace.created_at_ms > 0)
+                cJSON_AddNumberToObject(trace, "created_at_ms", p.trace.created_at_ms);
+            if (p.trace.received_at_ms > 0)
+                cJSON_AddNumberToObject(trace, "received_at_ms", p.trace.received_at_ms);
+            if (!p.trace.packet_id.empty())
+                cJSON_AddStringToObject(trace, "packet_id", p.trace.packet_id.c_str());
+
+            if (!p.trace.hop_history.empty())
+            {
+                cJSON *hop_history = cJSON_CreateArray();
+                for (const auto &hop : p.trace.hop_history)
+                {
+                    cJSON *hop_obj = cJSON_CreateObject();
+                    cJSON_AddStringToObject(hop_obj, "node_id", hop.node_id.c_str());
+                    if (!hop.node_name.empty())
+                        cJSON_AddStringToObject(hop_obj, "node_name", hop.node_name.c_str());
+                    cJSON_AddNumberToObject(hop_obj, "timestamp_ms", hop.timestamp_ms);
+                    cJSON_AddNumberToObject(hop_obj, "rssi", hop.rssi);
+                    if (!hop.transport.empty())
+                        cJSON_AddStringToObject(hop_obj, "transport", hop.transport.c_str());
+                    cJSON_AddItemToArray(hop_history, hop_obj);
+                }
+                cJSON_AddItemToObject(trace, "hop_history", hop_history);
+            }
+            
+            cJSON_AddItemToObject(root, "trace", trace);
+        }
+
         // Serializar topologia
-        if (!p.topology.node_id.empty() || !p.topology.neighbors.empty() || p.topology.has_gateway)
+        if (!p.topology.node_id.empty() || !p.topology.neighbors.empty() || p.topology.has_gateway || 
+            !p.topology.node_name.empty() || !p.topology.connectivity.connections.empty() ||
+            !p.topology.node_info.node_id.empty())
         {
             cJSON *topology = cJSON_CreateObject();
             if (!p.topology.node_id.empty())
                 cJSON_AddStringToObject(topology, "node_id", p.topology.node_id.c_str());
+            if (!p.topology.node_name.empty())
+                cJSON_AddStringToObject(topology, "node_name", p.topology.node_name.c_str());
             cJSON_AddBoolToObject(topology, "has_gateway", p.topology.has_gateway);
             if (!p.topology.gateway_id.empty())
                 cJSON_AddStringToObject(topology, "gateway_id", p.topology.gateway_id.c_str());
@@ -208,6 +436,71 @@ namespace WetzelMesh::Protocol
                 }
                 cJSON_AddItemToObject(topology, "neighbors", neighbors);
             }
+
+            // Serializar connectivity matrix
+            if (!p.topology.connectivity.connections.empty())
+            {
+                cJSON *connectivity = cJSON_CreateObject();
+                cJSON *connections = cJSON_CreateArray();
+                for (const auto &conn : p.topology.connectivity.connections)
+                {
+                    cJSON *conn_obj = cJSON_CreateObject();
+                    cJSON_AddStringToObject(conn_obj, "from_node_id", conn.from_node_id.c_str());
+                    cJSON_AddStringToObject(conn_obj, "to_node_id", conn.to_node_id.c_str());
+                    cJSON_AddNumberToObject(conn_obj, "rssi", conn.rssi);
+                    cJSON_AddNumberToObject(conn_obj, "last_communication_ms", conn.last_communication_ms);
+                    cJSON_AddNumberToObject(conn_obj, "packet_count", conn.packet_count);
+                    cJSON_AddBoolToObject(conn_obj, "is_direct", conn.is_direct);
+                    cJSON_AddItemToArray(connections, conn_obj);
+                }
+                cJSON_AddItemToObject(connectivity, "connections", connections);
+                cJSON_AddItemToObject(topology, "connectivity", connectivity);
+            }
+
+            // Serializar node_info
+            if (!p.topology.node_info.node_id.empty())
+            {
+                cJSON *node_info = cJSON_CreateObject();
+                cJSON_AddStringToObject(node_info, "node_id", p.topology.node_info.node_id.c_str());
+                if (!p.topology.node_info.node_name.empty())
+                    cJSON_AddStringToObject(node_info, "node_name", p.topology.node_info.node_name.c_str());
+                if (!p.topology.node_info.node_type.empty())
+                    cJSON_AddStringToObject(node_info, "node_type", p.topology.node_info.node_type.c_str());
+                if (p.topology.node_info.first_seen_ms > 0)
+                    cJSON_AddNumberToObject(node_info, "first_seen_ms", p.topology.node_info.first_seen_ms);
+                if (p.topology.node_info.last_seen_ms > 0)
+                    cJSON_AddNumberToObject(node_info, "last_seen_ms", p.topology.node_info.last_seen_ms);
+                if (p.topology.node_info.battery_level >= 0)
+                    cJSON_AddNumberToObject(node_info, "battery_level", p.topology.node_info.battery_level);
+                if (p.topology.node_info.position_x != 0.0f || p.topology.node_info.position_y != 0.0f)
+                {
+                    cJSON_AddNumberToObject(node_info, "position_x", p.topology.node_info.position_x);
+                    cJSON_AddNumberToObject(node_info, "position_y", p.topology.node_info.position_y);
+                }
+
+                if (!p.topology.node_info.capabilities.empty())
+                {
+                    cJSON *capabilities = cJSON_CreateArray();
+                    for (const auto &cap : p.topology.node_info.capabilities)
+                    {
+                        cJSON_AddItemToArray(capabilities, cJSON_CreateString(cap.c_str()));
+                    }
+                    cJSON_AddItemToObject(node_info, "capabilities", capabilities);
+                }
+
+                if (!p.topology.node_info.metadata.empty())
+                {
+                    cJSON *metadata = cJSON_CreateObject();
+                    for (const auto &pair : p.topology.node_info.metadata)
+                    {
+                        cJSON_AddStringToObject(metadata, pair.first.c_str(), pair.second.c_str());
+                    }
+                    cJSON_AddItemToObject(node_info, "metadata", metadata);
+                }
+
+                cJSON_AddItemToObject(topology, "node_info", node_info);
+            }
+
             cJSON_AddItemToObject(root, "topology", topology);
         }
 
@@ -251,6 +544,24 @@ namespace WetzelMesh::Protocol
         
         std::ostringstream oss;
         oss << std::hex << timestamp << "-" << random_val;
+        return oss.str();
+    }
+
+    std::string generate_packet_id()
+    {
+        // Gera ID único estilo UUID para rastreamento de pacotes
+        uint64_t timestamp = esp_timer_get_time() / 1000ULL; // ms
+        uint32_t random1 = esp_random();
+        uint32_t random2 = esp_random();
+        uint32_t random3 = esp_random();
+        
+        std::ostringstream oss;
+        oss << std::hex << std::setfill('0') << std::setw(8) << (timestamp & 0xFFFFFFFF)
+            << "-" << std::setw(4) << ((timestamp >> 32) & 0xFFFF)
+            << "-" << std::setw(4) << (random1 & 0xFFFF)
+            << "-" << std::setw(4) << ((random1 >> 16) & 0xFFFF)
+            << "-" << std::setw(8) << (random2 & 0xFFFFFFFF)
+            << std::setw(4) << (random3 & 0xFFFF);
         return oss.str();
     }
 
