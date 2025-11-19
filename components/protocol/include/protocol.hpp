@@ -120,7 +120,7 @@ namespace WetzelMesh::Protocol
         // Metadados de roteamento
         std::string next_hop;         // Próximo node no caminho
         std::string routing_strategy; // "flooding", "shortest_path", etc
-        uint32_t ttl = 10;            // Time to live (evitar loops)
+        uint32_t ttl = 50;            // Time to live (evitar loops) - padrão 50 para redes maiores
     };
 
     // Constrói um Packet a partir de string JSON

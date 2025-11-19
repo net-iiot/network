@@ -359,7 +359,7 @@ namespace WetzelMesh
             std::string current_node_id = BLETransport::node_id();
             uint64_t now_ms = esp_timer_get_time() / 1000ULL;
             
-            // Adicionar border node ao path
+            // Verificar se este node já está no path (detecção de loop)
             bool already_in_path = false;
             for (const auto &node : updated_pkt.trace.path)
             {
@@ -370,11 +370,24 @@ namespace WetzelMesh
                 }
             }
             
-            if (!already_in_path)
+            // Se já passou por este node, descarta imediatamente (loop detectado)
+            if (already_in_path)
             {
-                updated_pkt.trace.path.push_back(current_node_id);
-                updated_pkt.trace.hop_count++;
+                ESP_LOGW(TAG, "Loop detectado: border node já está no path, descartando pacote");
+                return;
             }
+            
+            // Verificar TTL antes de processar
+            if (updated_pkt.ttl == 0)
+            {
+                ESP_LOGW(TAG, "TTL expirado, descartando pacote");
+                return;
+            }
+            
+            // Decrementa TTL e adiciona node ao path
+            updated_pkt.ttl--;
+            updated_pkt.trace.path.push_back(current_node_id);
+            updated_pkt.trace.hop_count++;
             
             updated_pkt.trace.received_at_ms = now_ms;
             

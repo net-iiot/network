@@ -364,7 +364,7 @@ namespace WetzelMesh::Protocol
             cJSON_AddStringToObject(root, "next_hop", p.next_hop.c_str());
         if (!p.routing_strategy.empty())
             cJSON_AddStringToObject(root, "routing_strategy", p.routing_strategy.c_str());
-        if (p.ttl != 10) // Só adiciona se diferente do padrão
+        if (p.ttl != 50) // Só adiciona se diferente do padrão (50)
             cJSON_AddNumberToObject(root, "ttl", p.ttl);
 
         // Serializar trace

@@ -933,7 +933,7 @@ namespace WetzelMesh
             pkt.trace.path.push_back("gateway"); // Inicia o caminho
             pkt.trace.hop_count = 0;
             pkt.routing_strategy = "flooding";
-            pkt.ttl = 10;
+            pkt.ttl = 50; // TTL aumentado para suportar redes maiores (50 hops)
 
             // Adicionar hop inicial do gateway
             Protocol::HopInfo gateway_hop;

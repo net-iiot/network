@@ -4,6 +4,7 @@
 #include "nvs_flash.h"
 #include "esp_event.h"
 #include "esp_netif.h"
+#include "esp_mac.h"
 #include <cstring>
 
 #include "led_manager.hpp"
@@ -36,14 +37,30 @@ extern "C" void app_main(void)
     esp_log_level_set("NETMAN", ESP_LOG_INFO);
     esp_log_level_set("ESPNOW", ESP_LOG_INFO);
     
-    // Pequeno delay para garantir que o monitor está pronto
-    vTaskDelay(pdMS_TO_TICKS(100));
+    // Delay para garantir que o monitor está pronto
+    vTaskDelay(pdMS_TO_TICKS(500));
 
-    ESP_LOGI(TAG, "");
-    ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
-    ESP_LOGI(TAG, "INICIANDO WETZEL MESH");
-    ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
-    ESP_LOGI(TAG, "Modo: %s", kIsGateway ? "Gateway" : "Node");
+    // Lê e exibe MAC address IMEDIATAMENTE (antes de qualquer inicialização)
+    uint8_t mac[6];
+    esp_err_t mac_err = esp_read_mac(mac, ESP_MAC_WIFI_STA);
+    if (mac_err == ESP_OK)
+    {
+        ESP_LOGI(TAG, "");
+        ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
+        ESP_LOGI(TAG, "INICIANDO WETZEL MESH");
+        ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
+        ESP_LOGI(TAG, "MAC ADDRESS: %02X:%02X:%02X:%02X:%02X:%02X", 
+                 mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+        ESP_LOGI(TAG, "Modo: %s", kIsGateway ? "Gateway" : "Node");
+    }
+    {
+        ESP_LOGI(TAG, "");
+        ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
+        ESP_LOGI(TAG, "INICIANDO WETZEL MESH");
+        ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
+        ESP_LOGI(TAG, "Modo: %s", kIsGateway ? "Gateway" : "Node");
+        ESP_LOGW(TAG, "Erro ao ler MAC address: %s", esp_err_to_name(mac_err));
+    }
     
     // Mostra configurações do menuconfig (se Gateway)
     if (kIsGateway)

@@ -152,7 +152,7 @@ namespace WetzelMesh
         discovery.trace.created_at_ms = now_ms;
         discovery.trace.path.push_back("gateway");
         discovery.routing_strategy = "flooding";
-        discovery.ttl = 10;
+        discovery.ttl = 50; // TTL aumentado para suportar redes maiores
 
         Protocol::HopInfo hop;
         hop.node_id = "gateway";
@@ -262,7 +262,8 @@ namespace WetzelMesh
             json += "\"to_node_id\":\"" + conn.to_node_id + "\",";
             json += "\"rssi\":" + std::to_string(conn.rssi) + ",";
             json += "\"is_direct\":" + std::string(conn.is_direct ? "true" : "false") + ",";
-            json += "\"last_communication_ms\":" + std::to_string(conn.last_communication_ms);
+            json += "\"last_communication_ms\":" + std::to_string(conn.last_communication_ms) + ",";
+            json += "\"packet_count\":" + std::to_string(conn.packet_count);
             json += "}";
         }
         

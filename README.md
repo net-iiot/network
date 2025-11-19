@@ -428,6 +428,7 @@ O sistema de rastreabilidade é **automático** e **transparente**:
 Com essas informações, o app pode:
 
 #### 1. **Desenhar o Grafo da Rede**
+
 ```javascript
 // Exemplo de uso no app
 const nodes = extractNodesFromPackets(packets);
@@ -446,6 +447,7 @@ const edges = extractConnectionsFromTopology(packets);
 ```
 
 #### 2. **Mostrar Caminho Percorrido por Cada Pacote**
+
 ```javascript
 // Visualizar rota completa
 const packetTrace = packet.trace;
@@ -457,12 +459,14 @@ packetTrace.path.forEach((nodeId, index) => {
 ```
 
 #### 3. **Exibir Estatísticas de Rede**
+
 - **Latência**: `received_at_ms - created_at_ms` por hop
 - **Qualidade de Conexão**: RSSI médio por conexão
 - **Throughput**: `packet_count` por conexão
 - **Topologia**: Grafo completo de quem pode falar com quem
 
 #### 4. **Mapeamento Automático**
+
 - Coletar todos os pacotes recebidos
 - Extrair `topology.connectivity.connections`
 - Construir matriz completa de conectividade
@@ -559,6 +563,12 @@ idf.py fullclean
 idf.py build
 ```
 
+### 5️⃣ Exibir Mac
+
+```bash
+C:\Espressif\python_env\idf5.5_py3.11_env\Scripts\esptool.exe --port COM6 read_mac
+```
+
 ---
 
 ## 📱 Integração com Microserviço e App
@@ -648,18 +658,23 @@ Response: {
 ### Estruturas de Dados Principais
 
 #### `Protocol::Packet`
+
 Estrutura completa do pacote com todos os campos de rastreabilidade, topologia e roteamento.
 
 #### `Protocol::TraceInfo`
+
 Informações de rastreamento: path, hop_count, timestamps, packet_id, hop_history.
 
 #### `Protocol::TopologyInfo`
+
 Informações de topologia: node_id, node_name, neighbors, connectivity matrix, node_info.
 
 #### `Protocol::ConnectivityMatrix`
+
 Matriz de conectividade: lista de conexões entre nodes com estatísticas.
 
 #### `Protocol::NodeInfo`
+
 Informações completas do node: tipo, capacidades, posição, bateria, metadados.
 
 ### Funções Helper
