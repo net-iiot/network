@@ -435,9 +435,9 @@ CONFIG_PARTITION_TABLE_MD5=y
 #
 # Wetzel Mesh (Configurações)
 #
-CONFIG_WM_ROLE_GATEWAY=y
-# CONFIG_WM_ROLE_NODE is not set
-CONFIG_WETZEL_IS_GATEWAY=y
+# CONFIG_WM_ROLE_GATEWAY is not set
+CONFIG_WM_ROLE_NODE=y
+# CONFIG_WETZEL_ENABLE_BLE is not set
 # CONFIG_WM_MODE_TEST is not set
 CONFIG_WM_MODE_REAL=y
 
@@ -447,14 +447,6 @@ CONFIG_WM_MODE_REAL=y
 CONFIG_WETZEL_NETWORK_ID="wetzel"
 CONFIG_WETZEL_WIFI_CHANNEL=1
 # end of Isolamento de Rede
-
-#
-# Credenciais de Rede (apenas Gateway)
-#
-CONFIG_WETZEL_GATEWAY_WIFI_SSID=""
-CONFIG_WETZEL_GATEWAY_WIFI_PASSWORD=""
-CONFIG_WETZEL_GATEWAY_SERVER_URL="http://192.168.1.100:8080"
-# end of Credenciais de Rede (apenas Gateway)
 # end of Wetzel Mesh (Configurações)
 
 #

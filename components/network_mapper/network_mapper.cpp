@@ -181,6 +181,7 @@ namespace WetzelMesh
                 Protocol::Connection conn;
                 conn.from_node_id = node.gateway_id;
                 conn.to_node_id = node.node_id;
+                conn.rssi = node.rssi; // RSSI do border node
                 conn.is_direct = true;
                 conn.last_communication_ms = node.discovered_at_ms;
                 conn.packet_count = 1; // Será atualizado pelo microserviço
@@ -209,8 +210,10 @@ namespace WetzelMesh
                 Protocol::Connection conn;
                 conn.from_node_id = "gateway";
                 conn.to_node_id = pair.second.node_id;
+                conn.rssi = pair.second.rssi; // RSSI do border node
                 conn.is_direct = true;
                 conn.last_communication_ms = pair.second.discovered_at_ms;
+                conn.packet_count = 1; // Será atualizado pelo microserviço
                 s_last_map.connectivity.connections.push_back(conn);
                 break;
             }
