@@ -43,6 +43,9 @@ namespace WetzelMesh
         // Configura mapeamento periódico (0 = desabilitado)
         static void set_periodic_mapping(uint32_t interval_seconds);
         
+        // Configura envio periódico do mapa para servidor (0 = desabilitado)
+        static void set_periodic_map_send(uint32_t interval_seconds);
+        
         // Obtém último mapeamento realizado
         static NetworkMap get_last_map();
         
@@ -61,6 +64,7 @@ namespace WetzelMesh
         static bool s_isGateway;
         static bool s_mapping_in_progress;
         static uint32_t s_periodic_interval_seconds;
+        static uint32_t s_periodic_map_send_interval_seconds;
         static NetworkMap s_last_map;
         static std::map<std::string, NodeMappingInfo> s_collected_nodes;
         static uint64_t s_mapping_start_time;

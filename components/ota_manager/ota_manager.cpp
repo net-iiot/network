@@ -129,7 +129,7 @@ namespace WetzelMesh
         if (s_status_callback)
             s_status_callback(s_status, "Verificando atualizações...");
 
-        // Cria requisição HTTP para verificar versão
+        // Cria requisição HTTP GET para verificar versão
         std::string version_url = s_server_url + "/api/firmware/version";
         
         esp_http_client_config_t config = {};
@@ -146,6 +146,10 @@ namespace WetzelMesh
             return;
         }
 
+        // Define método GET explicitamente
+        esp_http_client_set_method(client, HTTP_METHOD_GET);
+        
+        ESP_LOGI(TAG, "Fazendo GET para: %s", version_url.c_str());
         esp_err_t err = esp_http_client_perform(client);
         if (err == ESP_OK)
         {

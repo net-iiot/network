@@ -114,7 +114,7 @@ extern "C" void app_main(void)
 #ifdef CONFIG_WETZEL_GATEWAY_SERVER_URL
         Gateway::init(CONFIG_WETZEL_GATEWAY_SERVER_URL);
 #else
-        Gateway::init("http://192.168.1.100:8080"); // Fallback se constante não existir
+        Gateway::init("http://172.16.10.110:5002"); // Fallback se constante não existir
 #endif
         ESP_LOGI(TAG, "Gateway::init() concluído!");
     }
