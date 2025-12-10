@@ -415,6 +415,17 @@ namespace WetzelMesh
             }
 #endif
 
+            // IMPORTANTE: Processa o pacote LOCALMENTE primeiro (para que o border node responda ao DISCOVERY)
+            // DEPOIS reencaminha para a mesh
+            pkt = updated_pkt; // Atualizar pkt original para o handler
+            
+            // Processa localmente primeiro (permite que border node responda ao DISCOVERY)
+            if (s_rx_handler)
+            {
+                ESP_LOGI(TAG, "Border node processando pacote localmente antes de reencaminhar: method=%s", updated_pkt.method.c_str());
+                s_rx_handler(pkt);
+            }
+            
             // Reencaminha TODOS os pacotes recebidos do UART para a rede mesh
             // Border node aguarda 1 segundo antes de repassar (com LED aceso)
             if (updated_pkt.route.dst == "border" || updated_pkt.route.dst == "broadcast" || updated_pkt.route.dst.empty())
@@ -429,11 +440,6 @@ namespace WetzelMesh
                 ESPNOWTransport::send(updated_pkt);
                 LedManager::blink(TrafficSource::MESH); // LED pisca quando envia para a rede
             }
-            
-            pkt = updated_pkt; // Atualizar pkt original para o handler
-
-            if (s_rx_handler)
-                s_rx_handler(pkt);
         }
     }
 

@@ -11,6 +11,8 @@
 #include "router.hpp"
 #include "led_manager.hpp"
 #include "network_manager.hpp"
+#include "border_uart.hpp"
+#include "ble_transport.hpp"
 
 namespace WetzelMesh
 {
@@ -291,6 +293,24 @@ namespace WetzelMesh
                 {
                     // Atualizar RSSI do último hop (que foi o que enviou)
                     pkt.trace.hop_history.back().rssi = rssi;
+                }
+                
+                // IMPORTANTE: Border node deve interceptar DISCOVERY_RESPONSE antes do Router
+                // para reencaminhar via UART ao invés de via mesh
+                if (pkt.type == Protocol::PacketType::RESPONSE && 
+                    pkt.method == "DISCOVERY_RESPONSE" && 
+                    pkt.route.dst == "gateway" &&
+                    BorderUart::is_enabled())
+                {
+                    std::string my_id = BLETransport::node_id();
+                    // Se não é do próprio border node, reencaminha via UART
+                    if (pkt.route.src != my_id && pkt.route.src != "border")
+                    {
+                        ESP_LOGI(TAG, "RX[MESH] DISCOVERY_RESPONSE de %s interceptado no border -> UART", pkt.route.src.c_str());
+                        NetworkManager::handle_incoming(pkt); // Processa diretamente (vai para UART)
+                        LedManager::blink(TrafficSource::MESH);
+                        return;
+                    }
                 }
                 
                 // Só pisca LED para dados reais (não HELLO)

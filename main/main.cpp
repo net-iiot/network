@@ -53,6 +53,7 @@ extern "C" void app_main(void)
                  mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
         ESP_LOGI(TAG, "Modo: %s", kIsGateway ? "Gateway" : "Node");
     }
+    else
     {
         ESP_LOGI(TAG, "");
         ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
@@ -127,7 +128,11 @@ extern "C" void app_main(void)
     {
         // Configura mapeamento periódico a cada 60 segundos (opcional)
         // NetworkMapper::set_periodic_mapping(60);
-        ESP_LOGI(TAG, "NetworkMapper configurado no gateway");
+        
+        // Configura envio periódico do mapa a cada 1 segundo
+        NetworkMapper::set_periodic_map_send(1);
+        
+        ESP_LOGI(TAG, "NetworkMapper configurado no gateway (envio a cada 1 segundo)");
     }
     
     // Inicializa OTA Manager

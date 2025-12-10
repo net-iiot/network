@@ -249,6 +249,77 @@ void NetworkManager::handle_incoming(const Protocol::Packet &packet)
     }
 #endif
     
+    // Processa DISCOVERY - nodes devem responder com DISCOVERY_RESPONSE
+    if (packet.type == Protocol::PacketType::REQUEST && packet.method == "DISCOVERY")
+    {
+        ESP_LOGI(TAG, "Pacote DISCOVERY recebido de %s", packet.route.src.c_str());
+        
+        // Cria resposta DISCOVERY_RESPONSE
+        Protocol::Packet response;
+        response.type = Protocol::PacketType::RESPONSE;
+        response.method = "DISCOVERY_RESPONSE";
+        response.route.src = BLETransport::node_id();
+        response.route.dst = packet.route.src;
+        response.status = 200;
+        response.request_id = packet.trace.packet_id;
+        
+        // Preenche informações de topologia
+        response.topology.node_id = BLETransport::node_id();
+        response.topology.network_id = s_network_id;
+        response.topology.has_gateway = BorderUart::is_enabled();
+        response.topology.gateway_id = BorderUart::is_enabled() ? "gateway" : "";
+        
+        // Adiciona vizinhos
+        for (const auto &nbr : s_neighbors)
+        {
+            Protocol::NeighborInfo nbr_info;
+            nbr_info.node_id = nbr.id;
+            nbr_info.rssi = nbr.rssi;
+            nbr_info.last_seen_ms = nbr.last_seen_ms;
+            response.topology.neighbors.push_back(nbr_info);
+        }
+        
+        // Adiciona trace
+        response.trace = packet.trace;
+        response.trace.path.push_back(BLETransport::node_id());
+        response.trace.hop_count++;
+        
+        Protocol::HopInfo hop;
+        hop.node_id = BLETransport::node_id();
+        hop.timestamp_ms = now_ms();
+        hop.transport = BorderUart::is_enabled() ? "UART" : "MESH";
+        response.trace.hop_history.push_back(hop);
+        
+        ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
+        ESP_LOGI(TAG, "Enviando DISCOVERY_RESPONSE com %u vizinhos", (unsigned)response.topology.neighbors.size());
+        ESP_LOGI(TAG, "Node ID: %s, Destino: %s", response.route.src.c_str(), response.route.dst.c_str());
+        ESP_LOGI(TAG, "Border UART habilitado: %s", BorderUart::is_enabled() ? "SIM" : "NÃO");
+        ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
+        
+        // Envia resposta de volta para o gateway
+        if (BorderUart::is_enabled())
+        {
+            ESP_LOGI(TAG, "Enviando DISCOVERY_RESPONSE via UART (border node)");
+            BorderUart::send_to_gateway(response);
+        }
+        else
+        {
+            ESP_LOGI(TAG, "Enviando DISCOVERY_RESPONSE via MESH (node comum)");
+            // Reencaminha pela mesh (o router vai cuidar do roteamento)
+            Router::handle_packet(response);
+        }
+        
+        // IMPORTANTE: Se o DISCOVERY é broadcast, também precisa reencaminhar para outros nodes
+        // (flooding) para que todos os nodes recebam e respondam
+        if (packet.route.dst == "broadcast")
+        {
+            ESP_LOGI(TAG, "Reencaminhando DISCOVERY (broadcast) para outros nodes da mesh...");
+            Router::handle_packet(packet);
+        }
+        
+        return;
+    }
+    
     // Processa chunks - se for chunk, tenta reconstruir
     if (packet.is_chunk)
     {
@@ -280,6 +351,24 @@ void NetworkManager::handle_incoming(const Protocol::Packet &packet)
             ESPNOWTransport::send(packet);
         }
         return;
+    }
+    
+    // Processa DISCOVERY_RESPONSE de nodes comuns que chegam via mesh no border node
+    // Se o border node recebe DISCOVERY_RESPONSE via mesh, reencaminha para gateway via UART
+    // IMPORTANTE: Isso deve ser ANTES do check de "gateway" acima, para interceptar antes do Router
+    if (packet.type == Protocol::PacketType::RESPONSE && 
+        packet.method == "DISCOVERY_RESPONSE" && 
+        packet.route.dst == "gateway" &&
+        BorderUart::is_enabled())
+    {
+        // Verifica se o pacote NÃO veio do próprio border node (evita loop)
+        std::string my_id = BLETransport::node_id();
+        if (packet.route.src != my_id && packet.route.src != "border")
+        {
+            ESP_LOGI(TAG, "FORWARD: DISCOVERY_RESPONSE de %s (via MESH) -> GW via UART", packet.route.src.c_str());
+            BorderUart::send_to_gateway(packet);
+            return;
+        }
     }
 
     // Broadcast/controlado — habilite se quiser propagar

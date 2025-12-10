@@ -49,8 +49,8 @@ namespace WetzelMesh
     static void wifi_reconnect_task(void *);
     static void wifi_scan_task(void *);
     
-    // Estado do token no Gateway
-    static bool s_gateway_has_token = false;
+    // Estado do token no Gateway (usado apenas em modo teste)
+    [[maybe_unused]] static bool s_gateway_has_token = false;
     
     // Estado WiFi
     static bool s_wifi_should_reconnect = false;
@@ -986,6 +986,7 @@ namespace WetzelMesh
     {
         std::string request_id;
         std::string response_body;
+        bool deleted = false; // Flag para evitar double-free
     };
     
     // Callback do cliente HTTP para receber resposta
@@ -999,6 +1000,38 @@ namespace WetzelMesh
         {
         case HTTP_EVENT_ERROR:
             ESP_LOGE(TAG, "HTTP_EVENT_ERROR");
+            {
+                // Verifica se é erro de conexão
+                if (data && !data->deleted)
+                {
+                    // Tenta recuperar contexto antes de enviar resposta
+                    auto ctx = HttpContextManager::instance().get_context(data->request_id);
+                    if (ctx)
+                    {
+                        // Envia resposta de erro apenas se contexto existe
+                        Protocol::Packet error_response;
+                        error_response.type = Protocol::PacketType::RESPONSE;
+                        error_response.route.src = "gateway";
+                        error_response.route.dst = ctx->original_src;
+                        error_response.request_id = data->request_id;
+                        error_response.status = 500;
+                        error_response.body = R"({"error":"HTTP connection failed"})";
+                        
+                        ESP_LOGW(TAG, "Enviando resposta de erro para: %s", ctx->original_src.c_str());
+                        Gateway::send_to_border(error_response);
+                        HttpContextManager::instance().remove_context(data->request_id);
+                    }
+                    else
+                    {
+                        ESP_LOGW(TAG, "Contexto não encontrado para request_id: %s", data->request_id.c_str());
+                    }
+                    
+                    // Marca como deletado antes de deletar
+                    data->deleted = true;
+                    delete data;
+                    data = nullptr;
+                }
+            }
             break;
         case HTTP_EVENT_ON_CONNECTED:
             ESP_LOGI(TAG, "HTTP_EVENT_ON_CONNECTED");
@@ -1019,53 +1052,64 @@ namespace WetzelMesh
         case HTTP_EVENT_ON_FINISH:
             ESP_LOGI(TAG, "HTTP_EVENT_ON_FINISH");
             {
-                // Recupera contexto
-                auto ctx = HttpContextManager::instance().get_context(data->request_id);
-                if (ctx)
+                if (data && !data->deleted)
                 {
-                    int status_code = esp_http_client_get_status_code(evt->client);
-                    
-                    // Cria resposta
-                    Protocol::Packet response;
-                    response.type = Protocol::PacketType::RESPONSE;
-                    response.route.src = "gateway";
-                    response.route.dst = ctx->original_src;
-                    response.status = status_code;
-                    response.body = data->response_body;
-                    response.request_id = data->request_id;
-                    
-                    ESP_LOGI(TAG, "Resposta HTTP: status=%d body_size=%u", status_code, (unsigned)data->response_body.size());
-                    
-                    // Se resposta é muito grande, particiona em chunks
-                    if (data->response_body.size() > kMaxChunkSize)
+                    // Recupera contexto
+                    auto ctx = HttpContextManager::instance().get_context(data->request_id);
+                    if (ctx)
                     {
-                        auto chunks = Protocol::create_chunks(response, kMaxChunkSize);
-                        ESP_LOGI(TAG, "Resposta grande, dividindo em %u chunks", (unsigned)chunks.size());
+                        int status_code = esp_http_client_get_status_code(evt->client);
                         
-                        for (const auto &chunk : chunks)
+                        // Pisca LED quando requisição HTTP é bem-sucedida
+                        if (status_code >= 200 && status_code < 300)
                         {
-                            Gateway::send_to_border(chunk);
-                            vTaskDelay(pdMS_TO_TICKS(10)); // Pequeno delay entre chunks
+                            LedManager::blink(TrafficSource::SERVER);
                         }
-                    }
-                    else
-                    {
-                        Gateway::send_to_border(response);
+                        
+                        // Cria resposta
+                        Protocol::Packet response;
+                        response.type = Protocol::PacketType::RESPONSE;
+                        response.route.src = "gateway";
+                        response.route.dst = ctx->original_src;
+                        response.status = status_code;
+                        response.body = data->response_body;
+                        response.request_id = data->request_id;
+                        
+                        ESP_LOGI(TAG, "Resposta HTTP: status=%d body_size=%u", status_code, (unsigned)data->response_body.size());
+                        
+                        // Se resposta é muito grande, particiona em chunks
+                        if (data->response_body.size() > kMaxChunkSize)
+                        {
+                            auto chunks = Protocol::create_chunks(response, kMaxChunkSize);
+                            ESP_LOGI(TAG, "Resposta grande, dividindo em %u chunks", (unsigned)chunks.size());
+                            
+                            for (const auto &chunk : chunks)
+                            {
+                                Gateway::send_to_border(chunk);
+                                vTaskDelay(pdMS_TO_TICKS(10)); // Pequeno delay entre chunks
+                            }
+                        }
+                        else
+                        {
+                            Gateway::send_to_border(response);
+                        }
+                        
+                        // Remove contexto
+                        HttpContextManager::instance().remove_context(data->request_id);
                     }
                     
-                    // Remove contexto
-                    HttpContextManager::instance().remove_context(data->request_id);
+                    // Marca como deletado antes de deletar
+                    data->deleted = true;
+                    delete data;
+                    data = nullptr;
                 }
             }
-            data->response_body.clear();
-            // Limpa callback_data após processar resposta
-            delete data;
             break;
         case HTTP_EVENT_DISCONNECTED:
             ESP_LOGI(TAG, "HTTP_EVENT_DISCONNECTED");
             // Em caso de desconexão antes de FINISH, limpa dados
-            // Mas só se ainda não foi deletado no ON_FINISH
-            if (data)
+            // Mas só se ainda não foi deletado no ON_FINISH ou ERROR
+            if (data && !data->deleted)
             {
                 // Verifica se o contexto ainda existe (se não existe, já foi processado)
                 auto ctx = HttpContextManager::instance().get_context(data->request_id);
@@ -1080,6 +1124,7 @@ namespace WetzelMesh
                     // Contexto ainda existe, então ON_FINISH não foi chamado
                     // Remove contexto e deleta data
                     HttpContextManager::instance().remove_context(data->request_id);
+                    data->deleted = true;
                     delete data;
                     data = nullptr;
                 }
@@ -1093,6 +1138,24 @@ namespace WetzelMesh
     
     bool Gateway::send_http_request(const Protocol::Packet &request_pkt)
     {
+        // Verificar se WiFi está conectado antes de tentar HTTP
+        wifi_ap_record_t ap_info;
+        if (esp_wifi_sta_get_ap_info(&ap_info) != ESP_OK)
+        {
+            ESP_LOGW(TAG, "WiFi não conectado, não é possível enviar requisição HTTP");
+            
+            // Envia resposta de erro
+            Protocol::Packet error_response;
+            error_response.type = Protocol::PacketType::RESPONSE;
+            error_response.route.src = "gateway";
+            error_response.route.dst = request_pkt.route.src;
+            error_response.status = 503; // Service Unavailable
+            error_response.body = R"({"error":"WiFi not connected"})";
+            error_response.request_id = HttpContextManager::instance().create_context(request_pkt, s_server_url);
+            send_to_border(error_response);
+            return false;
+        }
+        
         // Cria contexto
         std::string request_id = HttpContextManager::instance().create_context(request_pkt, s_server_url);
         
@@ -1165,10 +1228,12 @@ namespace WetzelMesh
             
             HttpContextManager::instance().remove_context(request_id);
             
-            // Se houver erro, o callback pode não ser chamado, então deleta aqui
-            // Mas primeiro verifica se o callback já deletou (marca como nullptr)
-            if (callback_data)
+            // Se houver erro, o callback HTTP_EVENT_ERROR pode ser chamado e deletar o callback_data
+            // Mas se não for chamado, precisamos deletar aqui
+            // Verifica se já foi deletado pelo callback usando a flag
+            if (callback_data && !callback_data->deleted)
             {
+                callback_data->deleted = true;
                 delete callback_data;
                 callback_data = nullptr;
             }
@@ -1179,7 +1244,8 @@ namespace WetzelMesh
         // callback_data será deletado no callback HTTP_EVENT_ON_FINISH ou HTTP_EVENT_DISCONNECTED
         // Não deleta aqui para evitar double-free
         
-        LedManager::blink(TrafficSource::SERVER);
+        // LED já pisca no HTTP_EVENT_ON_FINISH quando status é 2xx
+        // Não precisa piscar aqui também para evitar duplicação
         return (err == ESP_OK);
     }
     

@@ -181,10 +181,22 @@ namespace WetzelMesh
         else
         {
             ESP_LOGE(TAG, "Erro ao verificar atualizações: %s", esp_err_to_name(err));
+            
+            // Melhorar tratamento: verificar tipo de erro
+            if (err == ESP_ERR_HTTP_CONNECT)
+            {
+                ESP_LOGW(TAG, "Servidor não acessível. Verifique:");
+                ESP_LOGW(TAG, "  1. Servidor está rodando?");
+                ESP_LOGW(TAG, "  2. URL está correta? (%s)", version_url.c_str());
+                ESP_LOGW(TAG, "  3. WiFi está conectado?");
+            }
+            
+            // Não marca como FAILED imediatamente - pode ser temporário
+            // Mantém IDLE para tentar novamente na próxima verificação
         }
 
         esp_http_client_cleanup(client);
-        s_status = OTAStatus::IDLE;
+        s_status = OTAStatus::IDLE;  // Mantém IDLE para retry automático
         
         if (s_status_callback)
             s_status_callback(s_status, "Verificação concluída");
