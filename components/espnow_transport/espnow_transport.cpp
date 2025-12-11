@@ -295,6 +295,18 @@ namespace WetzelMesh
                     pkt.trace.hop_history.back().rssi = rssi;
                 }
                 
+                // IMPORTANTE: DISCOVERY precisa ser processado pelo NetworkManager ANTES de reencaminhar
+                // para que o node responda corretamente
+                if (pkt.type == Protocol::PacketType::REQUEST && pkt.method == "DISCOVERY")
+                {
+                    ESP_LOGI(TAG, "RX[MESH] DISCOVERY recebido - processando localmente primeiro...");
+                    LedManager::blink(TrafficSource::MESH); // Pisca ao receber
+                    NetworkManager::handle_incoming(pkt); // Processa localmente (node responde)
+                    // Depois reencaminha via Router (flooding)
+                    Router::handle_packet(pkt);
+                    return;
+                }
+                
                 // IMPORTANTE: Border node deve interceptar DISCOVERY_RESPONSE antes do Router
                 // para reencaminhar via UART ao invés de via mesh
                 if (pkt.type == Protocol::PacketType::RESPONSE && 
@@ -303,19 +315,31 @@ namespace WetzelMesh
                     BorderUart::is_enabled())
                 {
                     std::string my_id = BLETransport::node_id();
+                    ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
+                    ESP_LOGI(TAG, "BORDER NODE: Verificando DISCOVERY_RESPONSE");
+                    ESP_LOGI(TAG, "   Origem: %s", pkt.route.src.c_str());
+                    ESP_LOGI(TAG, "   Meu ID: %s", my_id.c_str());
+                    ESP_LOGI(TAG, "   Node Type: %s", pkt.topology.node_info.node_type.c_str());
                     // Se não é do próprio border node, reencaminha via UART
                     if (pkt.route.src != my_id && pkt.route.src != "border")
                     {
-                        ESP_LOGI(TAG, "RX[MESH] DISCOVERY_RESPONSE de %s interceptado no border -> UART", pkt.route.src.c_str());
-                        NetworkManager::handle_incoming(pkt); // Processa diretamente (vai para UART)
-                        LedManager::blink(TrafficSource::MESH);
+                        ESP_LOGI(TAG, "✅ INTERCEPTADO: DISCOVERY_RESPONSE de %s (via MESH) -> UART -> Gateway", pkt.route.src.c_str());
+                        LedManager::blink(TrafficSource::MESH); // Pisca ao receber
+                        // ✅ CORREÇÃO: Envia DIRETO para UART, sem passar pelo NetworkManager
+                        BorderUart::send_to_gateway(pkt);
+                        ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
                         return;
+                    }
+                    else
+                    {
+                        ESP_LOGI(TAG, "⚠️ IGNORADO: DISCOVERY_RESPONSE é do próprio border node");
+                        ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
                     }
                 }
                 
-                // Só pisca LED para dados reais (não HELLO)
-                Router::handle_packet(pkt);
+                // Pisca LED ao receber dados pela mesh (exceto HELLO que já foi tratado acima)
                 LedManager::blink(TrafficSource::MESH);
+                Router::handle_packet(pkt);
             }
         }
         else

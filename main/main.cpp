@@ -11,7 +11,6 @@
 #include "protocol.hpp"
 #include "router.hpp"
 #include "network_manager.hpp"
-#include "test_packet_generator.hpp"
 #include "gateway.hpp"
 #include "network_mapper.hpp"
 #include "ota_manager.hpp"
@@ -126,13 +125,14 @@ extern "C" void app_main(void)
     NetworkMapper::init(kIsGateway);
     if (kIsGateway)
     {
-        // Configura mapeamento periódico a cada 60 segundos (opcional)
-        // NetworkMapper::set_periodic_mapping(60);
+        // ✅ MUDANÇA: Mapeamento agora é apenas por eventos (NODE_JOINED/NODE_LEFT)
+        // Não há mais polling periódico - mapeamento é disparado quando:
+        // 1. Novo node é detectado via HELLO (notificado pelo border node)
+        // 2. Node é removido por timeout (notificado pelo border node)
+        // 3. Mapeamento inicial após 5 segundos (já implementado no NetworkMapper::init)
+        NetworkMapper::set_periodic_mapping(0); // 0 = desabilitado (apenas eventos)
         
-        // Configura envio periódico do mapa a cada 1 segundo
-        NetworkMapper::set_periodic_map_send(1);
-        
-        ESP_LOGI(TAG, "NetworkMapper configurado no gateway (envio a cada 1 segundo)");
+        ESP_LOGI(TAG, "NetworkMapper configurado no gateway (mapeamento por eventos apenas)");
     }
     
     // Inicializa OTA Manager
@@ -145,11 +145,6 @@ extern "C" void app_main(void)
     {
         ESP_LOGI(TAG, "OTA Manager configurado no gateway");
     }
-
-    // Geração de pacotes de teste a cada 1s (mantive seu nome de função)
-    // Gateway: gera e envia via UART -> borda -> mesh
-    // Node: gera e envia via mesh
-    start_test_generation();
 
     ESP_LOGI(TAG, "WetzelMesh pronto no modo: %s", kIsGateway ? "Gateway" : "Node");
 

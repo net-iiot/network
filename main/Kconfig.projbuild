@@ -12,57 +12,24 @@ config WM_ROLE_GATEWAY
       Compila/roda como GATEWAY:
       - BLE e ESPNOW desativados;
       - Apenas UART com o nó-borda e caminho ao servidor.
-      - Gera dados de teste a cada 5 segundos (modo TESTE) ou dados reais (modo PRODUÇÃO).
+      - Modo de produção - comunica com servidor via HTTP.
 
 config WM_ROLE_NODE
     bool "Node"
     help
       Compila/roda como NODE:
       - Mesh ESPNOW ativa;
-      - UART opcional: vira "borda" se fizer handshake com o gateway;
-      - BLE pode ser ligado/desligado pelo switch abaixo.
+      - BLE sempre ativo (todos os nodes têm BLE);
+      - UART detectado automaticamente: se houver gateway conectado via UART, 
+        o node se comunica com ele automaticamente.
+      IMPORTANTE: Todos os nodes são iguais. A diferença é apenas se há ou não 
+      um gateway conectado via UART. Isso é detectado automaticamente.
 endchoice
 
 config WETZEL_IS_GATEWAY
     bool
     default y if WM_ROLE_GATEWAY
     default n if WM_ROLE_NODE
-
-config WETZEL_ENABLE_BLE
-    bool "Enable BLE transport (apenas para NODE)"
-    depends on WM_ROLE_NODE
-    default y
-    help
-      Ativa o transporte BLE nos nós (advertising/scan/GATT conforme BLETransport).
-      Desligar reduz consumo/ruído de logs. A malha via ESPNOW continua funcionando.
-
-choice WM_OPERATION_MODE
-    prompt "Modo de Operação"
-    default WM_MODE_REAL
-    help
-      Selecione se o sistema roda em modo TESTE ou PRODUÇÃO.
-      
-      TESTE: Gateway gera dados a cada 5 segundos que ficam 1 segundo em cada node.
-      PRODUÇÃO: Modo de produção normal com comunicação real de dados.
-
-config WM_MODE_TEST
-    bool "Modo TESTE"
-    help
-      Modo de teste onde o gateway gera dados a cada 5 segundos.
-      Cada node mantém o dado por 1 segundo antes de repassar.
-      LED fica aceso durante o tempo de espera em cada node.
-
-config WM_MODE_REAL
-    bool "Modo PRODUÇÃO"
-    help
-      Modo de produção normal com comunicação real de dados.
-      Gateway não gera dados de teste automaticamente.
-endchoice
-
-config WETZEL_TEST_MODE
-    bool
-    default y if WM_MODE_TEST
-    default n if WM_MODE_REAL
 
 menu "Isolamento de Rede"
     help
@@ -91,6 +58,42 @@ config WETZEL_WIFI_CHANNEL
       - Rede 2: canal 6
       - Rede 3: canal 11
 
+config WETZEL_NEIGHBOR_TIMEOUT_MS
+    int "Timeout de Neighbors (milissegundos)"
+    default 12000
+    range 4000 60000
+    help
+      Tempo em milissegundos sem receber HELLO antes de considerar um node como desconectado.
+      HELLO é enviado a cada 2 segundos, então este valor deve ser múltiplo de 2000ms.
+      Recomendado: 12000ms (12 segundos) - permite perder até 5 HELLOs consecutivos.
+      Valores menores detectam desconexões mais rápido, mas podem ser sensíveis a perdas temporárias de pacotes.
+
+endmenu
+
+menu "Configurações BLE (apenas para NODE)"
+    depends on WM_ROLE_NODE
+    help
+      Configure as opções de BLE para os nodes. Todos os nodes terão BLE ativo
+      e usarão o mesmo nome de rede. A visibilidade controla se a rede aparece
+      em scans BLE ou se é invisível (mas ainda funcional para conexões diretas).
+
+config WETZEL_BLE_NETWORK_NAME
+    string "Nome da Rede BLE"
+    default "Wetzel Mesh 2.0"
+    help
+      Nome da rede BLE que será usado por todos os nodes.
+      Este nome será o mesmo para todos os nodes da rede.
+      Exemplo: "WetzelMesh", "MinhaRede", "Rede-01"
+
+config WETZEL_BLE_VISIBLE
+    bool "Rede BLE Visível"
+    default n
+    help
+      Se habilitado, a rede BLE aparecerá em scans BLE (discoverable).
+      Se desabilitado, a rede será invisível mas ainda funcional - apenas
+      dispositivos que conhecem o UUID do serviço poderão conectar.
+      Recomendado: Desabilitado para maior segurança (apenas app com plugin pode conectar).
+
 endmenu
 
 menu "Credenciais de Rede (apenas Gateway)"
@@ -101,7 +104,7 @@ menu "Credenciais de Rede (apenas Gateway)"
 
 config WETZEL_GATEWAY_WIFI_SSID
     string "SSID da Rede WiFi"
-    default ""
+    default "COR_ELE"
     help
       Nome da rede WiFi que o gateway irá conectar.
       Configure o nome exato da sua rede WiFi aqui.
@@ -109,14 +112,14 @@ config WETZEL_GATEWAY_WIFI_SSID
 
 config WETZEL_GATEWAY_WIFI_PASSWORD
     string "Senha da Rede WiFi"
-    default ""
+    default "Cwe@1602"
     help
       Senha da rede WiFi. Deixe vazio para rede aberta.
       Configure a senha da sua rede WiFi aqui.
 
 config WETZEL_GATEWAY_SERVER_URL
     string "URL do Servidor HTTP"
-    default "http://192.168.1.100:8080"
+    default "http://172.16.10.110:5003"
     help
       URL completa do servidor HTTP onde o microserviço está rodando.
       Exemplo: http://192.168.1.100:8080

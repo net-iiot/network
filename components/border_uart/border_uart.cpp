@@ -399,22 +399,6 @@ namespace WetzelMesh
             hop.transport = "UART";
             updated_pkt.trace.hop_history.push_back(hop);
 
-            // Processa TOKEN (modo teste) - token do gateway via UART
-#ifdef CONFIG_WETZEL_TEST_MODE
-            if (updated_pkt.type == Protocol::PacketType::EVENT && updated_pkt.method == "TOKEN")
-            {
-                // Token do gateway - passa para a mesh
-                if (updated_pkt.route.dst == "border" || updated_pkt.route.dst.empty())
-                {
-                    // Se não tem destino específico, passa para primeiro vizinho ou processa localmente
-                    ESP_LOGI(TAG, "TOKEN recebido do Gateway via UART - processando...");
-                    if (s_rx_handler)
-                        s_rx_handler(updated_pkt);
-                    return;
-                }
-            }
-#endif
-
             // IMPORTANTE: Processa o pacote LOCALMENTE primeiro (para que o border node responda ao DISCOVERY)
             // DEPOIS reencaminha para a mesh
             pkt = updated_pkt; // Atualizar pkt original para o handler
@@ -428,7 +412,8 @@ namespace WetzelMesh
             
             // Reencaminha TODOS os pacotes recebidos do UART para a rede mesh
             // Border node aguarda 1 segundo antes de repassar (com LED aceso)
-            if (updated_pkt.route.dst == "border" || updated_pkt.route.dst == "broadcast" || updated_pkt.route.dst.empty())
+            if (updated_pkt.route.dst == "border" || updated_pkt.route.dst == "broadcast" || updated_pkt.route.dst.empty() ||
+                (updated_pkt.type == Protocol::PacketType::REQUEST && updated_pkt.method == "DISCOVERY")) // ✅ Já está correto
             {
                 // Border node recebeu dado do UART - mantém LED aceso durante 1 segundo antes de repassar
                 ESP_LOGI(TAG, "Border node %s recebeu dado do UART (hop %u) - mantendo LED aceso por 1 segundo antes de repassar...", 
@@ -437,8 +422,8 @@ namespace WetzelMesh
                 vTaskDelay(pdMS_TO_TICKS(1000)); // Aguarda 1 segundo
                 
                 ESP_LOGI(TAG, "→ Reencaminhando pacote UART->MESH após 1 segundo: method=%s", updated_pkt.method.c_str());
+                // LED pisca dentro de ESPNOWTransport::send() quando envia
                 ESPNOWTransport::send(updated_pkt);
-                LedManager::blink(TrafficSource::MESH); // LED pisca quando envia para a rede
             }
         }
     }
@@ -455,7 +440,9 @@ namespace WetzelMesh
                 {
                     s_enabled = true;
                     LedManager::set_uart_enabled(true);
-                    xTaskCreatePinnedToCore(BorderUart::uart_listen_task, "border_uart_rx", 4096, nullptr, 5, nullptr, tskNO_AFFINITY);
+                    // Aumentado stack para 8192 bytes para evitar stack overflow
+                    // (a task usa buffer de 2048 bytes + strings + stack frames)
+                    xTaskCreatePinnedToCore(BorderUart::uart_listen_task, "border_uart_rx", 8192, nullptr, 5, nullptr, tskNO_AFFINITY);
                     vTaskDelete(nullptr);
                 }
                 else

@@ -5,6 +5,7 @@
 #include "led_manager.hpp"
 #include "espnow_transport.hpp"
 #include "ble_transport.hpp"
+#include "border_uart.hpp"
 #include "esp_timer.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -41,9 +42,25 @@ namespace WetzelMesh
         }
 
         // Em nó: roteamento básico
+        // IMPORTANTE: Se destino é "gateway" e este node tem UART habilitado, envia via UART
+        if (pkt.route.dst == "gateway")
+        {
+            // Se este node tem UART (border node), envia direto para gateway via UART
+            if (BorderUart::is_enabled())
+            {
+                ESP_LOGI(TAG, "Router: Pacote para gateway, enviando via UART (border node)");
+                BorderUart::send_to_gateway(pkt);
+                return;
+            }
+            // Se não tem UART, reencaminha pela mesh (continua o fluxo abaixo)
+            ESP_LOGI(TAG, "Router: Pacote para gateway, reencaminhando pela mesh (node comum)...");
+        }
+        
         // Quando recebe dados da mesh, aguarda 1 segundo antes de repassar
+        // IMPORTANTE: DISCOVERY (REQUEST) também precisa ser reencaminhado para flooding
         if (pkt.route.dst == "gateway" || pkt.route.dst == "broadcast" || 
-            (pkt.type == Protocol::PacketType::EVENT && pkt.method == "DATA"))
+            (pkt.type == Protocol::PacketType::EVENT && pkt.method == "DATA") ||
+            (pkt.type == Protocol::PacketType::REQUEST && pkt.method == "DISCOVERY"))
         {
             // Atualizar informações de rastreabilidade
             Protocol::Packet updated_pkt = pkt; // Cópia para modificar
@@ -98,6 +115,7 @@ namespace WetzelMesh
             
             // Envia pela malha; lógica "borda→UART" agora está em NetworkManager::send()
             ESP_LOGI(TAG, "Repassando dado após 1 segundo...");
+            // LED pisca dentro de ESPNOWTransport::send() quando envia
             ESPNOWTransport::send(updated_pkt);
             return;
         }

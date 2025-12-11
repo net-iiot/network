@@ -10,10 +10,10 @@
 #include "esp_timer.h"
 #include "border_uart.hpp"
 #include "chunk_manager.hpp"
-#include "test_packet_generator.hpp"
 #include "network_mapper.hpp"
 #include "mbedtls/md5.h"
 #include <cstring>
+#include <sstream>
 
 using namespace WetzelMesh;
 
@@ -65,9 +65,17 @@ void NetworkManager::init(bool isGateway)
     // Deriva PMK do Network ID
     derive_pmk_from_network_id();
     
+    // Obtém timeout configurado do menuconfig (padrão: 12000ms = 12s)
+    uint32_t neighbor_timeout_ms = 12000; // Fallback se não configurado
+#ifdef CONFIG_WETZEL_NEIGHBOR_TIMEOUT_MS
+    neighbor_timeout_ms = CONFIG_WETZEL_NEIGHBOR_TIMEOUT_MS;
+#endif
+    
     ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
     ESP_LOGI(TAG, "Network ID: %s", s_network_id.c_str());
     ESP_LOGI(TAG, "Canal WiFi: %u", get_wifi_channel());
+    ESP_LOGI(TAG, "Timeout de Neighbors: %u ms (%.1f segundos)", 
+             neighbor_timeout_ms, neighbor_timeout_ms / 1000.0f);
     ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
 
     if (s_gateway)
@@ -127,6 +135,15 @@ uint8_t NetworkManager::get_wifi_channel()
 
 void NetworkManager::refresh_neighbors_task(void *param)
 {
+    // Obtém timeout configurado do menuconfig (padrão: 12000ms = 12s)
+    // Lê apenas uma vez, pois é uma constante de compilação
+    uint32_t neighbor_timeout_ms = 12000; // Fallback se não configurado
+#ifdef CONFIG_WETZEL_NEIGHBOR_TIMEOUT_MS
+    neighbor_timeout_ms = CONFIG_WETZEL_NEIGHBOR_TIMEOUT_MS;
+#endif
+    
+    ESP_LOGI(TAG, "Task de refresh de neighbors iniciada (timeout: %u ms)", neighbor_timeout_ms);
+    
     for (;;)
     {
         const uint64_t now = now_ms();
@@ -134,8 +151,34 @@ void NetworkManager::refresh_neighbors_task(void *param)
 
         for (auto it = s_neighbors.begin(); it != s_neighbors.end();)
         {
-            if ((now - it->last_seen_ms) > 8000)
+            if ((now - it->last_seen_ms) > neighbor_timeout_ms)
+            {
+                // ✅ NOVO: Salva ID do node removido antes de apagar
+                std::string removed_node_id = it->id;
+                
+                // ✅ NOVO: Notifica gateway se for border node
+                if (BorderUart::is_enabled())
+                {
+                    Protocol::Packet notification;
+                    notification.type = Protocol::PacketType::EVENT;
+                    notification.method = "NODE_LEFT";
+                    notification.route.src = BLETransport::node_id();
+                    notification.route.dst = "gateway";
+                    
+                    // Cria JSON com informações do node removido
+                    std::ostringstream body;
+                    body << R"({"node_id":")" << removed_node_id << "}";
+                    notification.body = body.str();
+                    
+                    ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
+                    ESP_LOGI(TAG, "NODE REMOVIDO (timeout): %s", removed_node_id.c_str());
+                    ESP_LOGI(TAG, "Notificando gateway...");
+                    ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
+                    BorderUart::send_to_gateway(notification);
+                }
+                
                 it = s_neighbors.erase(it);
+            }
             else
             {
                 any_recent = true;
@@ -204,51 +247,6 @@ void NetworkManager::handle_incoming(const Protocol::Packet &packet)
         return;
     }
     
-    // Processa TOKEN (modo teste)
-#ifdef CONFIG_WETZEL_TEST_MODE
-    if (packet.type == Protocol::PacketType::EVENT && packet.method == "TOKEN")
-    {
-        std::string my_id = BLETransport::node_id();
-        
-        // Se o token é para este node ou para "border" (vindo do gateway via UART)
-        if (packet.route.dst == my_id || packet.route.dst == "border")
-        {
-            // Se destino é "border" e este é o border node, processa localmente
-            if (packet.route.dst == "border")
-            {
-                ESP_LOGI(TAG, "TOKEN recebido do Gateway via UART: %s -> border (este node)", packet.route.src.c_str());
-                // Ajusta origem para "gateway" para o test_packet_generator saber que veio do gateway
-                Protocol::Packet adjusted_packet = packet;
-                adjusted_packet.route.dst = my_id; // Ajusta destino para este node
-                on_token_received(adjusted_packet);
-                return;
-            }
-            else
-            {
-                ESP_LOGI(TAG, "TOKEN recebido: %s -> %s (este node)", packet.route.src.c_str(), packet.route.dst.c_str());
-                // Notifica o test_packet_generator
-                on_token_received(packet);
-                return;
-            }
-        }
-        // Se é broadcast, qualquer node pode receber (mas só processa se não tiver token)
-        else if (packet.route.dst == "broadcast")
-        {
-            ESP_LOGI(TAG, "TOKEN broadcast recebido de %s", packet.route.src.c_str());
-            on_token_received(packet);
-            return;
-        }
-        // Se não é para este node, reencaminha pela mesh
-        else
-        {
-            ESP_LOGI(TAG, "TOKEN não é para este node (%s), reencaminhando para %s", 
-                     my_id.c_str(), packet.route.dst.c_str());
-            ESPNOWTransport::send(packet);
-            return;
-        }
-    }
-#endif
-    
     // Processa DISCOVERY - nodes devem responder com DISCOVERY_RESPONSE
     if (packet.type == Protocol::PacketType::REQUEST && packet.method == "DISCOVERY")
     {
@@ -268,6 +266,10 @@ void NetworkManager::handle_incoming(const Protocol::Packet &packet)
         response.topology.network_id = s_network_id;
         response.topology.has_gateway = BorderUart::is_enabled();
         response.topology.gateway_id = BorderUart::is_enabled() ? "gateway" : "";
+        
+        // ✅ ADICIONAR: Preenche node_type na resposta
+        response.topology.node_info.node_id = BLETransport::node_id();
+        response.topology.node_info.node_type = BorderUart::is_enabled() ? "border" : "normal";
         
         // Adiciona vizinhos
         for (const auto &nbr : s_neighbors)
@@ -304,9 +306,24 @@ void NetworkManager::handle_incoming(const Protocol::Packet &packet)
         }
         else
         {
-            ESP_LOGI(TAG, "Enviando DISCOVERY_RESPONSE via MESH (node comum)");
-            // Reencaminha pela mesh (o router vai cuidar do roteamento)
-            Router::handle_packet(response);
+            ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
+            ESP_LOGI(TAG, "NODE COMUM: Enviando DISCOVERY_RESPONSE via MESH");
+            ESP_LOGI(TAG, "   Node ID: %s", response.route.src.c_str());
+            ESP_LOGI(TAG, "   Destino: %s", response.route.dst.c_str());
+            ESP_LOGI(TAG, "   Node Type: %s", response.topology.node_info.node_type.c_str());
+            ESP_LOGI(TAG, "   Vizinhos: %u", (unsigned)response.topology.neighbors.size());
+            ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
+            // Envia diretamente pela mesh para o gateway (ou para o border node que vai reencaminhar)
+            // O destino é o gateway, então envia via mesh
+            bool sent = ESPNOWTransport::send(response);
+            if (sent)
+            {
+                ESP_LOGI(TAG, "✅ DISCOVERY_RESPONSE enviada com sucesso via MESH");
+            }
+            else
+            {
+                ESP_LOGE(TAG, "❌ FALHA ao enviar DISCOVERY_RESPONSE via MESH");
+            }
         }
         
         // IMPORTANTE: Se o DISCOVERY é broadcast, também precisa reencaminhar para outros nodes
@@ -338,24 +355,9 @@ void NetworkManager::handle_incoming(const Protocol::Packet &packet)
         return;
     }
 
-    if (packet.route.dst == "gateway")
-    {
-        if (BorderUart::is_enabled())
-        {
-            ESP_LOGI(TAG, "FORWARD: NODE(BORDER) -> GW via UART");
-            BorderUart::send_to_gateway(packet);
-        }
-        else
-        {
-            ESP_LOGI(TAG, "FORWARD: NODE -> GW via MESH");
-            ESPNOWTransport::send(packet);
-        }
-        return;
-    }
-    
     // Processa DISCOVERY_RESPONSE de nodes comuns que chegam via mesh no border node
     // Se o border node recebe DISCOVERY_RESPONSE via mesh, reencaminha para gateway via UART
-    // IMPORTANTE: Isso deve ser ANTES do check de "gateway" acima, para interceptar antes do Router
+    // IMPORTANTE: Isso deve ser ANTES do check genérico de "gateway" abaixo
     if (packet.type == Protocol::PacketType::RESPONSE && 
         packet.method == "DISCOVERY_RESPONSE" && 
         packet.route.dst == "gateway" &&
@@ -369,6 +371,22 @@ void NetworkManager::handle_incoming(const Protocol::Packet &packet)
             BorderUart::send_to_gateway(packet);
             return;
         }
+    }
+    
+    // Pacotes com destino "gateway" - roteia via UART (se border) ou MESH (se node comum)
+    if (packet.route.dst == "gateway")
+    {
+        if (BorderUart::is_enabled())
+        {
+            ESP_LOGI(TAG, "FORWARD: NODE(BORDER) -> GW via UART");
+            BorderUart::send_to_gateway(packet);
+        }
+        else
+        {
+            ESP_LOGI(TAG, "FORWARD: NODE -> GW via MESH");
+            ESPNOWTransport::send(packet);
+        }
+        return;
     }
 
     // Broadcast/controlado — habilite se quiser propagar
@@ -453,7 +471,25 @@ void NetworkManager::on_hello(const Protocol::Packet &hello_packet, int rssi)
                  s_network_id.c_str(), node_id.c_str(), rssi);
         ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
         
-        // Dispara mapeamento se for gateway
+        // ✅ NOVO: Se for border node, notifica gateway imediatamente
+        if (BorderUart::is_enabled())
+        {
+            Protocol::Packet notification;
+            notification.type = Protocol::PacketType::EVENT;
+            notification.method = "NODE_JOINED";
+            notification.route.src = BLETransport::node_id();
+            notification.route.dst = "gateway";
+            
+            // Cria JSON com informações do novo node
+            std::ostringstream body;
+            body << R"({"node_id":")" << node_id << R"(","rssi":)" << rssi << "}";
+            notification.body = body.str();
+            
+            ESP_LOGI(TAG, "Notificando gateway sobre novo node: %s", node_id.c_str());
+            BorderUart::send_to_gateway(notification);
+        }
+        
+        // Dispara mapeamento se for gateway (não deveria acontecer, mas mantém por segurança)
         if (s_gateway)
         {
             ESP_LOGI(TAG, "Disparando mapeamento devido a novo node detectado...");

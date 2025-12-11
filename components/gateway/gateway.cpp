@@ -43,14 +43,9 @@ namespace WetzelMesh
     static std::queue<Protocol::Packet> s_http_request_queue;
     static std::mutex s_queue_mutex;
 
-    // Só a test task permanece como função livre
-    static void test_packet_task(void *);
     static void uart_status_task(void *);
     static void wifi_reconnect_task(void *);
     static void wifi_scan_task(void *);
-    
-    // Estado do token no Gateway (usado apenas em modo teste)
-    [[maybe_unused]] static bool s_gateway_has_token = false;
     
     // Estado WiFi
     static bool s_wifi_should_reconnect = false;
@@ -529,9 +524,6 @@ namespace WetzelMesh
         // Task para reconexão WiFi (não bloqueia handlers)
         xTaskCreatePinnedToCore(wifi_reconnect_task, "wifi_reconnect", 2048, nullptr, 3, nullptr, tskNO_AFFINITY);
 
-        // Gera tráfego de teste HELLO → valida caminho completo UART→MESH
-        xTaskCreatePinnedToCore(test_packet_task, "gw_uart_tx_test", 4096, nullptr, 5, nullptr, tskNO_AFFINITY);
-
         ESP_LOGI(TAG, "Gateway inicializado (UART TX=%d RX=%d, Server=%s).", kTxPin, kRxPin, s_server_url.c_str());
     }
     
@@ -684,22 +676,42 @@ namespace WetzelMesh
             // Processa resposta DISCOVERY_RESPONSE (mapeamento)
             if (pkt.type == Protocol::PacketType::RESPONSE && pkt.method == "DISCOVERY_RESPONSE")
             {
-                ESP_LOGI(TAG, "Resposta DISCOVERY recebida via UART de %s", pkt.route.src.c_str());
+                ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
+                ESP_LOGI(TAG, "GATEWAY: Resposta DISCOVERY recebida via UART");
+                ESP_LOGI(TAG, "   Origem: %s", pkt.route.src.c_str());
+                ESP_LOGI(TAG, "   Destino: %s", pkt.route.dst.c_str());
+                ESP_LOGI(TAG, "   Node ID (topology): %s", pkt.topology.node_id.c_str());
+                ESP_LOGI(TAG, "   Node ID (node_info): %s", pkt.topology.node_info.node_id.c_str());
+                ESP_LOGI(TAG, "   Node Type: %s", pkt.topology.node_info.node_type.c_str());
+                ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
                 NetworkMapper::on_discovery_response(pkt);
                 continue;
             }
 
-            // Processa TOKEN (modo teste) - token voltou do border node
-#ifdef CONFIG_WETZEL_TEST_MODE
-            if (pkt.type == Protocol::PacketType::EVENT && pkt.method == "TOKEN" && pkt.route.dst == "gateway")
+            // ✅ NOVO: Processa eventos NODE_JOINED e NODE_LEFT para disparar mapeamento
+            if (pkt.type == Protocol::PacketType::EVENT)
             {
-                ESP_LOGI(TAG, "TOKEN voltou ao Gateway de %s", pkt.route.src.c_str());
-                s_gateway_has_token = true;
-                // LED acende quando recebe token
-                LedManager::set_led_on_for_duration(1000); // 1 segundo (padrão do teste)
-                continue;
+                if (pkt.method == "NODE_JOINED")
+                {
+                    ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
+                    ESP_LOGI(TAG, "GATEWAY: Evento NODE_JOINED recebido via UART");
+                    ESP_LOGI(TAG, "   Body: %s", pkt.body.c_str());
+                    ESP_LOGI(TAG, "   Disparando mapeamento imediato...");
+                    ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
+                    NetworkMapper::trigger_mapping();
+                    continue;
+                }
+                else if (pkt.method == "NODE_LEFT")
+                {
+                    ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
+                    ESP_LOGI(TAG, "GATEWAY: Evento NODE_LEFT recebido via UART");
+                    ESP_LOGI(TAG, "   Body: %s", pkt.body.c_str());
+                    ESP_LOGI(TAG, "   Disparando mapeamento imediato...");
+                    ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
+                    NetworkMapper::trigger_mapping();
+                    continue;
+                }
             }
-#endif
 
             if (pkt.route.dst == "server" || pkt.type == Protocol::PacketType::REQUEST)
             {
@@ -860,111 +872,6 @@ namespace WetzelMesh
         }
     }
 
-    static void test_packet_task(void *)
-    {
-#ifdef CONFIG_WETZEL_TEST_MODE
-        // Modo TESTE: Gateway inicia token passing
-        ESP_LOGI(TAG, "Modo TESTE: Gateway iniciando token passing (não aguarda UART conectar)");
-        vTaskDelay(pdMS_TO_TICKS(2000)); // Pequeno delay para sistema estabilizar
-        
-        // Inicia token imediatamente, sem esperar UART conectar
-        ESP_LOGI(TAG, "Gateway iniciando token passing");
-        s_gateway_has_token = true;
-        
-        for (;;)
-        {
-            // Se tem token, mantém por tempo configurado e depois passa
-            if (s_gateway_has_token)
-            {
-                uint32_t hold_time = 1000; // 1 segundo (padrão do teste)
-                ESP_LOGI(TAG, "Gateway tem TOKEN - mantendo por %u ms", hold_time);
-                vTaskDelay(pdMS_TO_TICKS(hold_time));
-                
-                // Passa token para border node via UART
-                Protocol::Packet token{};
-                token.type = Protocol::PacketType::EVENT;
-                token.method = "TOKEN";
-                token.route.src = "gateway";
-                token.route.dst = "border"; // Border node recebe e passa adiante
-                token.body = R"({"type":"token","from":"gateway"})";
-                
-                ESP_LOGI(TAG, "Gateway passando TOKEN para border node via UART");
-                if (Gateway::send(token))
-                {
-                    s_gateway_has_token = false;
-                    ESP_LOGI(TAG, "Token enviado via UART");
-                }
-                else
-                {
-                    ESP_LOGW(TAG, "Falha ao enviar token via UART - UART não conectada");
-                }
-            }
-            else
-            {
-                // Se não tem token e UART não está conectada, não faz nada
-                // Se não tem token mas UART está conectada, aguarda token voltar
-                vTaskDelay(pdMS_TO_TICKS(100));
-            }
-        }
-#else
-        // Modo REAL: Gateway gera e envia dados a cada 5 segundos infinitamente
-        ESP_LOGI(TAG, "Modo REAL: Gateway iniciando geração de dados a cada 5 segundos");
-        std::srand(static_cast<unsigned>(time(nullptr)));
-        int seq = 0;
-        
-        // Pequeno delay inicial para sistema estabilizar
-        vTaskDelay(pdMS_TO_TICKS(2000));
-        
-        for (;;)
-        {
-            Protocol::Packet pkt{};
-            pkt.type = Protocol::PacketType::EVENT;
-            pkt.method = "DATA";
-            pkt.route.src = "gateway";
-            pkt.route.dst = "border";
-            pkt.body = "{\"temp\":" + std::to_string(20 + (std::rand() % 10)) +
-                       ",\"hum\":" + std::to_string(50 + (std::rand() % 20)) +
-                       ",\"seq\":" + std::to_string(seq++) + "}";
-
-            // Preencher informações de rastreabilidade
-            uint64_t now_ms = esp_timer_get_time() / 1000ULL;
-            pkt.trace.packet_id = Protocol::generate_packet_id();
-            pkt.trace.created_at_ms = now_ms;
-            pkt.trace.path.push_back("gateway"); // Inicia o caminho
-            pkt.trace.hop_count = 0;
-            pkt.routing_strategy = "flooding";
-            pkt.ttl = 50; // TTL aumentado para suportar redes maiores (50 hops)
-
-            // Adicionar hop inicial do gateway
-            Protocol::HopInfo gateway_hop;
-            gateway_hop.node_id = "gateway";
-            gateway_hop.node_name = "Gateway Principal";
-            gateway_hop.timestamp_ms = now_ms;
-            gateway_hop.transport = "UART";
-            pkt.trace.hop_history.push_back(gateway_hop);
-
-            ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
-            ESP_LOGI(TAG, "Gateway gerando e enviando dado #%d: %s", seq, pkt.body.c_str());
-            ESP_LOGI(TAG, "Packet ID: %s", pkt.trace.packet_id.c_str());
-            ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
-
-            // ⚠️ Usa API pública, mantendo uart_write_json privada:
-            bool sent = Gateway::send(pkt);
-            if (sent)
-            {
-                ESP_LOGI(TAG, "Dado enviado com sucesso via UART");
-            }
-            else
-            {
-                ESP_LOGW(TAG, "Falha ao enviar dado via UART (continuando mesmo assim)");
-            }
-
-            ESP_LOGI(TAG, "Aguardando 5 segundos antes do próximo envio...");
-            vTaskDelay(pdMS_TO_TICKS(5000)); // a cada 5 s
-            ESP_LOGI(TAG, "5 segundos passaram, gerando próximo dado...");
-        }
-#endif
-    }
 
     // ---------------------------------------------------------------------
     // Expostas para NetworkManager / Router (resolvem os 'undefined reference')

@@ -2,6 +2,7 @@
 #include "router.hpp"
 #include "esp_log.h"
 #include "nvs_flash.h"
+#include "nvs.h"
 #include "esp_mac.h"
 #include "esp_bt.h"
 #include "esp_bt_main.h"
@@ -13,6 +14,8 @@
 #include "protocol.hpp"
 #include <string.h>
 #include <cstring>
+#include <vector>
+#include <set>
 
 using namespace WetzelMesh;
 
@@ -33,6 +36,13 @@ static esp_gatt_if_t g_gatts_if = ESP_GATT_IF_NONE;
 bool BLETransport::s_isGateway = false;
 
 // -----------------------------------------------------------------------------
+// Bonding/Pairing - dispositivos pareados
+// -----------------------------------------------------------------------------
+static std::set<std::string> s_bonded_devices; // MAC addresses dos dispositivos pareados
+static const char* BONDED_DEVICES_NVS_NAMESPACE = "ble_bonded";
+static const char* BONDED_DEVICES_KEY = "devices";
+
+// -----------------------------------------------------------------------------
 // Advertising global
 // -----------------------------------------------------------------------------
 static esp_ble_adv_params_t s_adv_params = {};
@@ -45,7 +55,7 @@ static bool s_advertising = false;
 // -----------------------------------------------------------------------------
 static esp_ble_adv_data_t s_adv_data = {
     .set_scan_rsp = false,
-    .include_name = true,
+    .include_name = false, // Será configurado dinamicamente baseado na visibilidade
     .include_txpower = false,
     .min_interval = 0x0006,
     .max_interval = 0x0010,
@@ -61,13 +71,13 @@ static esp_ble_adv_data_t s_adv_data = {
 // -----------------------------------------------------------------------------
 // Funções auxiliares
 // -----------------------------------------------------------------------------
-static std::string make_node_name()
+static std::string get_ble_network_name()
 {
-    uint8_t mac[6];
-    esp_read_mac(mac, ESP_MAC_WIFI_STA);
-    char buf[16];
-    snprintf(buf, sizeof(buf), "WM-%02X%02X", mac[4], mac[5]);
-    return std::string(buf);
+#ifdef CONFIG_WETZEL_BLE_NETWORK_NAME
+    return std::string(CONFIG_WETZEL_BLE_NETWORK_NAME);
+#else
+    return std::string("WetzelMesh"); // Fallback
+#endif
 }
 
 std::string BLETransport::node_id()
@@ -100,6 +110,118 @@ static void maybe_start_advertising()
 }
 
 // -----------------------------------------------------------------------------
+// Funções de gerenciamento de bonding
+// -----------------------------------------------------------------------------
+static std::string mac_to_string(const uint8_t* mac)
+{
+    char buf[18];
+    snprintf(buf, sizeof(buf), "%02X:%02X:%02X:%02X:%02X:%02X",
+             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    return std::string(buf);
+}
+
+static void save_bonded_devices()
+{
+    nvs_handle_t nvs_handle;
+    esp_err_t err = nvs_open(BONDED_DEVICES_NVS_NAMESPACE, NVS_READWRITE, &nvs_handle);
+    if (err != ESP_OK)
+    {
+        ESP_LOGE(TAG, "Erro ao abrir NVS para salvar dispositivos pareados: %s", esp_err_to_name(err));
+        return;
+    }
+
+    // Serializa lista de MAC addresses (um por linha)
+    std::string devices_list;
+    for (const auto& mac : s_bonded_devices)
+    {
+        devices_list += mac + "\n";
+    }
+
+    err = nvs_set_str(nvs_handle, BONDED_DEVICES_KEY, devices_list.c_str());
+    if (err != ESP_OK)
+    {
+        ESP_LOGE(TAG, "Erro ao salvar dispositivos pareados: %s", esp_err_to_name(err));
+    }
+    else
+    {
+        ESP_LOGI(TAG, "Dispositivos pareados salvos (%zu dispositivos)", s_bonded_devices.size());
+    }
+
+    nvs_commit(nvs_handle);
+    nvs_close(nvs_handle);
+}
+
+static void load_bonded_devices()
+{
+    nvs_handle_t nvs_handle;
+    esp_err_t err = nvs_open(BONDED_DEVICES_NVS_NAMESPACE, NVS_READONLY, &nvs_handle);
+    if (err != ESP_OK)
+    {
+        ESP_LOGI(TAG, "Nenhum dispositivo pareado encontrado (primeira execução)");
+        return;
+    }
+
+    size_t required_size = 0;
+    err = nvs_get_str(nvs_handle, BONDED_DEVICES_KEY, nullptr, &required_size);
+    if (err != ESP_OK || required_size == 0)
+    {
+        ESP_LOGI(TAG, "Nenhum dispositivo pareado salvo");
+        nvs_close(nvs_handle);
+        return;
+    }
+
+    std::vector<char> buffer(required_size);
+    err = nvs_get_str(nvs_handle, BONDED_DEVICES_KEY, buffer.data(), &required_size);
+    if (err == ESP_OK)
+    {
+        std::string devices_list(buffer.data());
+        std::string mac;
+        for (char c : devices_list)
+        {
+            if (c == '\n' || c == '\r')
+            {
+                if (!mac.empty())
+                {
+                    s_bonded_devices.insert(mac);
+                    ESP_LOGI(TAG, "Dispositivo pareado carregado: %s", mac.c_str());
+                    mac.clear();
+                }
+            }
+            else
+            {
+                mac += c;
+            }
+        }
+        if (!mac.empty())
+        {
+            s_bonded_devices.insert(mac);
+            ESP_LOGI(TAG, "Dispositivo pareado carregado: %s", mac.c_str());
+        }
+        ESP_LOGI(TAG, "Total de dispositivos pareados carregados: %zu", s_bonded_devices.size());
+    }
+
+    nvs_close(nvs_handle);
+}
+
+static void add_bonded_device(const uint8_t* mac)
+{
+    std::string mac_str = mac_to_string(mac);
+    if (s_bonded_devices.find(mac_str) == s_bonded_devices.end())
+    {
+        s_bonded_devices.insert(mac_str);
+        ESP_LOGI(TAG, "Novo dispositivo pareado adicionado: %s", mac_str.c_str());
+        save_bonded_devices();
+    }
+}
+
+static bool is_bonded_device(const uint8_t* mac)
+{
+    std::string mac_str = mac_to_string(mac);
+    return s_bonded_devices.find(mac_str) != s_bonded_devices.end();
+}
+
+
+// -----------------------------------------------------------------------------
 // GAP handler
 // -----------------------------------------------------------------------------
 static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param)
@@ -125,6 +247,28 @@ static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param
         ESP_LOGI(TAG, "Advertising parado");
         break;
 
+    case ESP_GAP_BLE_SEC_REQ_EVT:
+        ESP_LOGI(TAG, "Solicitação de segurança BLE recebida");
+        // Aceita solicitação de segurança (bonding)
+        esp_ble_gap_security_rsp(param->ble_security.ble_req.bd_addr, true);
+        break;
+
+    case ESP_GAP_BLE_AUTH_CMPL_EVT:
+        if (param->ble_security.auth_cmpl.success)
+        {
+            ESP_LOGI(TAG, "Autenticação BLE concluída com sucesso");
+            add_bonded_device(param->ble_security.auth_cmpl.bd_addr);
+        }
+        else
+        {
+            ESP_LOGW(TAG, "Autenticação BLE falhou");
+        }
+        break;
+
+    case ESP_GAP_BLE_KEY_EVT:
+        ESP_LOGI(TAG, "Chave BLE recebida (bonding em progresso)");
+        break;
+
     default:
         break;
     }
@@ -143,16 +287,36 @@ static void gatts_event_handler(esp_gatts_cb_event_t event,
         g_gatts_if = gatts_if;
         ESP_LOGI(TAG, "GATT registrado (app_id=0x%x)", param->reg.app_id);
         {
-            const std::string name = make_node_name();
+            const std::string name = get_ble_network_name();
+            ESP_LOGI(TAG, "Configurando nome BLE: '%s'", name.c_str());
             ESP_ERROR_CHECK(esp_ble_gap_set_device_name(name.c_str()));
         }
         break;
 
     case ESP_GATTS_CONNECT_EVT:
-        ESP_LOGI(TAG, "BLE conectado: conn_id=%d", param->connect.conn_id);
+    {
+        const uint8_t* remote_mac = param->connect.remote_bda;
+        std::string mac_str = mac_to_string(remote_mac);
+        ESP_LOGI(TAG, "BLE conectado: conn_id=%d, MAC=%s", param->connect.conn_id, mac_str.c_str());
+        
+        // Verifica se é um dispositivo já pareado
+        if (is_bonded_device(remote_mac))
+        {
+            ESP_LOGI(TAG, "Dispositivo pareado reconectado automaticamente: %s", mac_str.c_str());
+        }
+        else
+        {
+            ESP_LOGI(TAG, "Novo dispositivo conectado (será pareado): %s", mac_str.c_str());
+            // Inicia processo de bonding (faz cast de const para não-const)
+            uint8_t mac_copy[6];
+            memcpy(mac_copy, remote_mac, 6);
+            esp_ble_set_encryption(mac_copy, ESP_BLE_SEC_ENCRYPT);
+        }
+        
         if (!BLETransport::isGateway())
             LedManager::set_node_joined(true);
         break;
+    }
 
     case ESP_GATTS_DISCONNECT_EVT:
         ESP_LOGW(TAG, "BLE desconectado: conn_id=%d", param->disconnect.conn_id);
@@ -227,9 +391,37 @@ void BLETransport::start_gap_gatt()
     ESP_ERROR_CHECK(esp_bluedroid_init());
     ESP_ERROR_CHECK(esp_bluedroid_enable());
 
+    // Configura Security Manager para permitir bonding
+    ESP_LOGI(TAG, "Configurando Security Manager (bonding habilitado)...");
+    
+    // IO Capabilities (Just Works - sem entrada de PIN)
+    esp_ble_io_cap_t iocap = ESP_IO_CAP_NONE;
+    esp_ble_gap_set_security_param(ESP_BLE_SM_IOCAP_MODE, &iocap, sizeof(uint8_t));
+    
+    // Authentication requirements (Security + MITM + Bonding)
+    uint8_t auth_req = ESP_LE_AUTH_REQ_SC_MITM_BOND;
+    esp_ble_gap_set_security_param(ESP_BLE_SM_AUTHEN_REQ_MODE, &auth_req, sizeof(uint8_t));
+    
+    // Tamanho máximo da chave de criptografia
+    uint8_t key_size = 16;
+    esp_ble_gap_set_security_param(ESP_BLE_SM_MAX_KEY_SIZE, &key_size, sizeof(uint8_t));
+    
+    // Chaves iniciais (encryption + identity)
+    uint8_t init_key = ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK;
+    esp_ble_gap_set_security_param(ESP_BLE_SM_SET_INIT_KEY, &init_key, sizeof(uint8_t));
+    
+    // Chaves de resposta (encryption + identity)
+    uint8_t rsp_key = ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK;
+    esp_ble_gap_set_security_param(ESP_BLE_SM_SET_RSP_KEY, &rsp_key, sizeof(uint8_t));
+
+    // Carrega dispositivos pareados salvos
+    load_bonded_devices();
+
     ESP_ERROR_CHECK(esp_ble_gap_register_callback(gap_event_handler));
     ESP_ERROR_CHECK(esp_ble_gatts_register_callback(gatts_event_handler));
     ESP_ERROR_CHECK(esp_ble_gatts_app_register(0x55));
+    
+    ESP_LOGI(TAG, "Security Manager configurado - bonding habilitado");
 }
 
 void BLETransport::setup_service()
@@ -247,7 +439,10 @@ void BLETransport::start_advertising()
 {
     s_adv_params.adv_int_min = 0x40;
     s_adv_params.adv_int_max = 0x60;
-    s_adv_params.adv_type = ADV_TYPE_IND;
+    
+    // Sempre usa ADV_TYPE_IND (connectable) - permite conexões mesmo se invisível
+    // A diferença entre visível/invisível é apenas se o nome aparece no advertising
+    s_adv_params.adv_type = ADV_TYPE_IND; // Connectable undirected advertising
     s_adv_params.own_addr_type = BLE_ADDR_TYPE_PUBLIC;
     s_adv_params.channel_map = ADV_CHNL_ALL;
     s_adv_params.adv_filter_policy = ADV_FILTER_ALLOW_SCAN_ANY_CON_ANY;
@@ -255,11 +450,20 @@ void BLETransport::start_advertising()
     s_adv_data_set = false;
     s_scan_rsp_set = false; // não vamos usar scan response
 
-    // ADV enxuto (nome + UUID de serviço)
+    // Configura se o nome será incluído no advertising (apenas se visível)
+#ifdef CONFIG_WETZEL_BLE_VISIBLE
     s_adv_data.include_name = true;
+    ESP_LOGI(TAG, "BLE configurado como VISÍVEL (aparece em scans com nome)");
+#else
+    s_adv_data.include_name = false; // Não inclui nome se invisível (mas ainda conectável via UUID)
+    ESP_LOGI(TAG, "BLE configurado como INVISÍVEL (não aparece em scans, mas conectável via UUID)");
+#endif
+    
     s_adv_data.manufacturer_len = 0;
     s_adv_data.p_manufacturer_data = nullptr;
 
+    ESP_LOGI(TAG, "Configurando advertising BLE (nome incluído: %s, tipo: connectable)", 
+             s_adv_data.include_name ? "SIM" : "NÃO");
     ESP_ERROR_CHECK(esp_ble_gap_config_adv_data(&s_adv_data));
 }
 
