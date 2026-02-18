@@ -534,6 +534,11 @@ namespace WetzelMesh
             return Gateway::send_to_border(pkt);
         });
 
+        // Registra callback de report OTA: gateway envia HTTP diretamente ao servidor
+        OTAManager::set_report_callback([](bool success, const std::string &command_id, const std::string &node_id, const std::string &error_msg) {
+            Gateway::send_ota_report(success, command_id, node_id, error_msg);
+        });
+
         ESP_LOGI(TAG, "Gateway inicializado (UART TX=%d RX=%d, Server=%s).", kTxPin, kRxPin, s_server_url.c_str());
     }
     
@@ -698,7 +703,7 @@ namespace WetzelMesh
                 continue;
             }
 
-            // ✅ NOVO: Processa eventos NODE_JOINED e NODE_LEFT para disparar mapeamento
+            // ✅ NOVO: Processa eventos NODE_JOINED, NODE_LEFT e OTA_RESULT
             if (pkt.type == Protocol::PacketType::EVENT)
             {
                 if (pkt.method == "NODE_JOINED")
@@ -719,6 +724,51 @@ namespace WetzelMesh
                     ESP_LOGI(TAG, "   Disparando mapeamento imediato...");
                     ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
                     NetworkMapper::trigger_mapping();
+                    continue;
+                }
+                else if (pkt.method == "OTA_RESULT")
+                {
+                    // Node enviou resultado de OTA - repassa ao servidor via HTTP
+                    ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
+                    ESP_LOGI(TAG, "GATEWAY: Resultado OTA recebido de node via UART");
+                    ESP_LOGI(TAG, "   Src: %s", pkt.route.src.c_str());
+                    ESP_LOGI(TAG, "   Body: %s", pkt.body.c_str());
+                    ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
+
+                    // Extrai campos do body JSON
+                    std::string command_id, node_id, error_msg;
+                    bool success = false;
+
+                    auto extract = [&](const std::string &key, bool is_bool = false) -> std::string {
+                        std::string search = "\"" + key + "\":";
+                        size_t pos = pkt.body.find(search);
+                        if (pos == std::string::npos) return "";
+                        pos += search.size();
+                        if (is_bool) {
+                            return (pkt.body.substr(pos, 4) == "true") ? "true" : "false";
+                        }
+                        if (pkt.body[pos] == '"') {
+                            pos++;
+                            size_t end = pkt.body.find('"', pos);
+                            return (end != std::string::npos) ? pkt.body.substr(pos, end - pos) : "";
+                        }
+                        return "";
+                    };
+
+                    command_id = extract("command_id");
+                    node_id = extract("node_id");
+                    if (node_id.empty()) node_id = pkt.route.src;
+                    error_msg = extract("error");
+                    success = (extract("success", true) == "true");
+
+                    if (!command_id.empty())
+                    {
+                        send_ota_report(success, command_id, node_id, error_msg);
+                    }
+                    else
+                    {
+                        ESP_LOGW(TAG, "OTA_RESULT sem command_id, ignorando");
+                    }
                     continue;
                 }
             }
@@ -1287,6 +1337,52 @@ namespace WetzelMesh
         }
     }
     
+    // Envia feedback de resultado OTA ao servidor via HTTP POST
+    void Gateway::send_ota_report(bool success, const std::string &command_id, const std::string &node_id, const std::string &error_msg)
+    {
+        std::string report_url = s_server_url + "/api/firmware/ota/report";
+
+        // Monta body JSON
+        std::ostringstream body;
+        body << R"({"command_id":")" << command_id
+             << R"(","node_id":")" << (node_id.empty() ? "gateway" : node_id)
+             << R"(","success":)" << (success ? "true" : "false");
+        if (!error_msg.empty())
+            body << R"(,"error":")" << error_msg << "\"";
+        body << "}";
+
+        std::string body_str = body.str();
+
+        esp_http_client_config_t config = {};
+        config.url = report_url.c_str();
+        config.timeout_ms = 5000;
+
+        esp_http_client_handle_t client = esp_http_client_init(&config);
+        if (!client)
+        {
+            ESP_LOGW(TAG, "OTA report: falha ao criar cliente HTTP");
+            return;
+        }
+
+        esp_http_client_set_method(client, HTTP_METHOD_POST);
+        esp_http_client_set_header(client, "Content-Type", "application/json");
+        esp_http_client_set_post_field(client, body_str.c_str(), (int)body_str.size());
+
+        esp_err_t err = esp_http_client_perform(client);
+        if (err == ESP_OK)
+        {
+            int status_code = esp_http_client_get_status_code(client);
+            ESP_LOGI(TAG, "OTA report enviado: command_id=%s, node=%s, success=%s, status_http=%d",
+                     command_id.c_str(), node_id.c_str(), success ? "true" : "false", status_code);
+        }
+        else
+        {
+            ESP_LOGW(TAG, "OTA report falhou: %s", esp_err_to_name(err));
+        }
+
+        esp_http_client_cleanup(client);
+    }
+
     static void check_ota_commands()
     {
         // Verifica se há comandos OTA pendentes no servidor

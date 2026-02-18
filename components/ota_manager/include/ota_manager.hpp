@@ -54,15 +54,20 @@ namespace WetzelMesh
         // Registra callback para enviar pacote ao border node (usado pelo gateway)
         using SendToBorderCallback = std::function<bool(const Protocol::Packet &)>;
         static void set_send_to_border_callback(SendToBorderCallback cb);
-        
+
+        // Registra callback para reportar resultado de OTA ao servidor (sucesso ou falha)
+        // Gateway: envia HTTP diretamente. Nodes: enviam pacote OTA_RESULT pela mesh.
+        using ReportCallback = std::function<void(bool success, const std::string &command_id, const std::string &node_id, const std::string &error_msg)>;
+        static void set_report_callback(ReportCallback cb);
+
         // Processa pacote OTA recebido da rede mesh
         static void handle_ota_packet(const std::string &json);
-        
+
         // Processa comandos OTA recebidos do servidor (JSON com lista de comandos)
         static void process_ota_commands(const std::string &json);
-        
+
         // Processa um comando OTA individual
-        static void process_ota_command(const std::string &target, const std::string &firmware_url, const std::string &version);
+        static void process_ota_command(const std::string &command_id, const std::string &target, const std::string &firmware_url, const std::string &version);
         
         // Task OTA (precisa ser pública para o wrapper C)
         static void ota_task(void *param);
@@ -80,6 +85,8 @@ namespace WetzelMesh
         static FirmwareVersion s_current_version;
         static StatusCallback s_status_callback;
         static SendToBorderCallback s_send_to_border_callback;
+        static ReportCallback s_report_callback;
+        static std::string s_current_command_id; // ID do comando OTA em execução
     };
 }
 

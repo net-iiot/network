@@ -99,6 +99,31 @@ void NetworkManager::init(bool isGateway)
 
         xTaskCreatePinnedToCore(&NetworkManager::refresh_neighbors_task, "neighbors", 4096, nullptr, 4, nullptr, 0);
         start_hello_task();
+
+        // Registra callback de report OTA: node envia pacote OTA_RESULT pela mesh para o gateway
+        OTAManager::set_report_callback([](bool success, const std::string &command_id, const std::string &node_id, const std::string &error_msg) {
+            std::string my_id = node_id.empty() ? BLETransport::node_id() : node_id;
+
+            Protocol::Packet result;
+            result.type = Protocol::PacketType::EVENT;
+            result.method = "OTA_RESULT";
+            result.route.src = my_id;
+            result.route.dst = "gateway";
+
+            std::ostringstream body;
+            body << R"({"command_id":")" << command_id
+                 << R"(","node_id":")" << my_id
+                 << R"(","success":)" << (success ? "true" : "false");
+            if (!error_msg.empty())
+                body << R"(,"error":")" << error_msg << "\"";
+            body << "}";
+            result.body = body.str();
+
+            ESP_LOGI("NETMAN", "Enviando OTA_RESULT: cmd=%s, node=%s, success=%s",
+                     command_id.c_str(), my_id.c_str(), success ? "true" : "false");
+            Router::handle_packet(result);
+        });
+
         ESP_LOGI(TAG, "INIT: NODE (mesh+BLE [+UART se borda])");
     }
 }
