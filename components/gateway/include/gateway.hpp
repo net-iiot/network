@@ -22,5 +22,6 @@ namespace WetzelMesh
     private:
         static std::string s_server_url;
         static void http_request_task(void *);
+        static void polling_task(void *);  // Task unificada: map + OTA commands
     };
 } // namespace WetzelMesh
