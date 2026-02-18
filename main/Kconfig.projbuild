@@ -70,31 +70,6 @@ config WETZEL_NEIGHBOR_TIMEOUT_MS
 
 endmenu
 
-menu "Configurações BLE (apenas para NODE)"
-    depends on WM_ROLE_NODE
-    help
-      Configure as opções de BLE para os nodes. Todos os nodes terão BLE ativo
-      e usarão o mesmo nome de rede. A visibilidade controla se a rede aparece
-      em scans BLE ou se é invisível (mas ainda funcional para conexões diretas).
-
-config WETZEL_BLE_NETWORK_NAME
-    string "Nome da Rede BLE"
-    default "Wetzel Mesh 2.0"
-    help
-      Nome da rede BLE que será usado por todos os nodes.
-      Este nome será o mesmo para todos os nodes da rede.
-      Exemplo: "WetzelMesh", "MinhaRede", "Rede-01"
-
-config WETZEL_BLE_VISIBLE
-    bool "Rede BLE Visível"
-    default n
-    help
-      Se habilitado, a rede BLE aparecerá em scans BLE (discoverable).
-      Se desabilitado, a rede será invisível mas ainda funcional - apenas
-      dispositivos que conhecem o UUID do serviço poderão conectar.
-      Recomendado: Desabilitado para maior segurança (apenas app com plugin pode conectar).
-
-endmenu
 
 menu "Credenciais de Rede (apenas Gateway)"
     depends on WM_ROLE_GATEWAY
