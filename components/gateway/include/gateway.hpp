@@ -18,6 +18,9 @@ namespace WetzelMesh
         static bool send_http_request(const Protocol::Packet &request_pkt);
         static void set_server_url(const std::string &url);
         static std::string get_server_url();
+
+        // Envia feedback de resultado OTA ao servidor
+        static void send_ota_report(bool success, const std::string &command_id, const std::string &node_id, const std::string &error_msg);
         
     private:
         static std::string s_server_url;

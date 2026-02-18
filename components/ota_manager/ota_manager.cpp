@@ -25,10 +25,17 @@ namespace WetzelMesh
     FirmwareVersion OTAManager::s_current_version;
     OTAManager::StatusCallback OTAManager::s_status_callback = nullptr;
     OTAManager::SendToBorderCallback OTAManager::s_send_to_border_callback = nullptr;
+    OTAManager::ReportCallback OTAManager::s_report_callback = nullptr;
+    std::string OTAManager::s_current_command_id = "";
 
     void OTAManager::set_send_to_border_callback(SendToBorderCallback cb)
     {
         s_send_to_border_callback = cb;
+    }
+
+    void OTAManager::set_report_callback(ReportCallback cb)
+    {
+        s_report_callback = cb;
     }
 
     std::string OTAManager::get_version_string()
@@ -240,12 +247,21 @@ namespace WetzelMesh
                 ESP_LOGI(TAG, "ATUALIZAÇÃO CONCLUÍDA COM SUCESSO!");
                 ESP_LOGI(TAG, "Reiniciando em 5 segundos...");
                 ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
-                
+
                 s_status = OTAStatus::SUCCESS;
                 if (s_status_callback)
                     s_status_callback(s_status, "Atualização concluída com sucesso");
-                
-                vTaskDelay(pdMS_TO_TICKS(5000));
+
+                // Envia feedback de sucesso antes de reiniciar
+                if (s_report_callback && !s_current_command_id.empty())
+                {
+                    std::string node_id = s_isGateway ? "gateway" : "";
+                    s_report_callback(true, s_current_command_id, node_id, "");
+                    // Aguarda envio do pacote antes de reiniciar
+                    vTaskDelay(pdMS_TO_TICKS(2000));
+                }
+
+                vTaskDelay(pdMS_TO_TICKS(3000));
                 esp_restart();
             }
             else
@@ -254,6 +270,11 @@ namespace WetzelMesh
                 s_status = OTAStatus::FAILED;
                 if (s_status_callback)
                     s_status_callback(s_status, "Falha ao instalar firmware");
+                if (s_report_callback && !s_current_command_id.empty())
+                {
+                    std::string node_id = s_isGateway ? "gateway" : "";
+                    s_report_callback(false, s_current_command_id, node_id, "Falha ao instalar firmware");
+                }
             }
         }
         else
@@ -262,6 +283,11 @@ namespace WetzelMesh
             s_status = OTAStatus::FAILED;
             if (s_status_callback)
                 s_status_callback(s_status, "Falha ao baixar firmware");
+            if (s_report_callback && !s_current_command_id.empty())
+            {
+                std::string node_id = s_isGateway ? "gateway" : "";
+                s_report_callback(false, s_current_command_id, node_id, "Falha ao baixar firmware");
+            }
         }
     }
 
@@ -394,6 +420,17 @@ namespace WetzelMesh
                 ESP_LOGI(TAG, "   Versão: %s", version.c_str());
                 ESP_LOGI(TAG, "   Target: %s", target.c_str());
                 ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
+
+                // Extrai command_id do body (se presente)
+                size_t cmd_pos = pkt.body.find("\"command_id\":\"");
+                if (cmd_pos != std::string::npos)
+                {
+                    cmd_pos += 14;
+                    size_t cmd_end = pkt.body.find("\"", cmd_pos);
+                    if (cmd_end != std::string::npos)
+                        s_current_command_id = pkt.body.substr(cmd_pos, cmd_end - cmd_pos);
+                }
+
                 start_update(firmware_url);
             }
             else
@@ -491,8 +528,8 @@ namespace WetzelMesh
                 ESP_LOGI(TAG, "   Target: %s", target.c_str());
                 ESP_LOGI(TAG, "   URL: %s", firmware_url.c_str());
                 ESP_LOGI(TAG, "   Versão: %s", version.c_str());
-                
-                process_ota_command(target, firmware_url, version);
+
+                process_ota_command(command_id, target, firmware_url, version);
             }
             
             cmd_start = cmd_end + 1;
@@ -501,21 +538,23 @@ namespace WetzelMesh
         ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
     }
 
-    void OTAManager::process_ota_command(const std::string &target, const std::string &firmware_url, const std::string &version)
+    void OTAManager::process_ota_command(const std::string &command_id, const std::string &target, const std::string &firmware_url, const std::string &version)
     {
         ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
         ESP_LOGI(TAG, "PROCESSANDO COMANDO OTA");
+        ESP_LOGI(TAG, "   ID: %s", command_id.c_str());
         ESP_LOGI(TAG, "   Target: %s", target.c_str());
         ESP_LOGI(TAG, "   URL: %s", firmware_url.c_str());
         ESP_LOGI(TAG, "   Versão: %s", version.c_str());
         ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
-        
+
         if (target == "gateway")
         {
             // Gateway faz OTA próprio
             if (s_isGateway)
             {
                 ESP_LOGI(TAG, "Gateway iniciando OTA próprio...");
+                s_current_command_id = command_id;
                 start_update(firmware_url);
             }
             else
@@ -529,19 +568,21 @@ namespace WetzelMesh
             if (s_isGateway)
             {
                 ESP_LOGI(TAG, "Gateway distribuindo comando OTA para nodes...");
-                
+
                 Protocol::Packet ota_cmd;
                 ota_cmd.type = Protocol::PacketType::REQUEST;
                 ota_cmd.method = "OTA_START";
                 ota_cmd.route.src = "gateway";
                 ota_cmd.route.dst = (target == "border") ? "border" : "broadcast";
-                
-                // Cria body JSON
+
+                // Cria body JSON incluindo command_id para o node reportar de volta
                 std::ostringstream body;
-                body << R"({"firmware_url":")" << firmware_url << R"(","version":")" << version << R"(","target":")" << target << "\"}";
+                body << R"({"firmware_url":")" << firmware_url
+                     << R"(","version":")" << version
+                     << R"(","target":")" << target
+                     << R"(","command_id":")" << command_id << "\"}";
                 ota_cmd.body = body.str();
-                
-                // Envia para border node via callback (registrado pelo gateway)
+
                 if (s_send_to_border_callback)
                     s_send_to_border_callback(ota_cmd);
                 ESP_LOGI(TAG, "Comando OTA enviado para border node via UART");
@@ -557,19 +598,21 @@ namespace WetzelMesh
             if (s_isGateway)
             {
                 ESP_LOGI(TAG, "Gateway distribuindo comando OTA para node específico: %s", target.c_str());
-                
+
                 Protocol::Packet ota_cmd;
                 ota_cmd.type = Protocol::PacketType::REQUEST;
                 ota_cmd.method = "OTA_START";
                 ota_cmd.route.src = "gateway";
                 ota_cmd.route.dst = target;
-                
-                // Cria body JSON
+
+                // Cria body JSON incluindo command_id para o node reportar de volta
                 std::ostringstream body;
-                body << R"({"firmware_url":")" << firmware_url << R"(","version":")" << version << R"(","target":")" << target << "\"}";
+                body << R"({"firmware_url":")" << firmware_url
+                     << R"(","version":")" << version
+                     << R"(","target":")" << target
+                     << R"(","command_id":")" << command_id << "\"}";
                 ota_cmd.body = body.str();
-                
-                // Envia para border node via callback (que propagará pela mesh)
+
                 if (s_send_to_border_callback)
                     s_send_to_border_callback(ota_cmd);
                 ESP_LOGI(TAG, "Comando OTA enviado para node %s via border", target.c_str());
@@ -578,6 +621,7 @@ namespace WetzelMesh
             {
                 // Node recebeu comando OTA direto (via mesh)
                 ESP_LOGI(TAG, "Node recebeu comando OTA direto, iniciando atualização...");
+                s_current_command_id = command_id;
                 start_update(firmware_url);
             }
         }
