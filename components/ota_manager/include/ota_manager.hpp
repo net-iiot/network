@@ -2,6 +2,7 @@
 #include <string>
 #include <stdint.h>
 #include <functional>
+#include "protocol.hpp"
 
 namespace WetzelMesh
 {
@@ -49,9 +50,19 @@ namespace WetzelMesh
         // Callback para notificar mudanças de status
         using StatusCallback = std::function<void(OTAStatus, const std::string &)>;
         static void set_status_callback(StatusCallback cb);
+
+        // Registra callback para enviar pacote ao border node (usado pelo gateway)
+        using SendToBorderCallback = std::function<bool(const Protocol::Packet &)>;
+        static void set_send_to_border_callback(SendToBorderCallback cb);
         
         // Processa pacote OTA recebido da rede mesh
         static void handle_ota_packet(const std::string &json);
+        
+        // Processa comandos OTA recebidos do servidor (JSON com lista de comandos)
+        static void process_ota_commands(const std::string &json);
+        
+        // Processa um comando OTA individual
+        static void process_ota_command(const std::string &target, const std::string &firmware_url, const std::string &version);
         
         // Task OTA (precisa ser pública para o wrapper C)
         static void ota_task(void *param);
@@ -68,6 +79,7 @@ namespace WetzelMesh
         static int s_download_progress;
         static FirmwareVersion s_current_version;
         static StatusCallback s_status_callback;
+        static SendToBorderCallback s_send_to_border_callback;
     };
 }
 

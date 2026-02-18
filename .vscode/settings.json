@@ -89,5 +89,6 @@
     "cinttypes": "cpp",
     "typeinfo": "cpp",
     "variant": "cpp"
-  }
+  },
+  "idf.currentSetup": "C:\\Users\\brunow\\esp\\v5.5.1\\esp-idf"
 }

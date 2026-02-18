@@ -8,11 +8,11 @@
 #include "freertos/task.h"
 #include "nvs_flash.h"
 #include "nvs.h"
-#include "network_manager.hpp"
-#include "gateway.hpp"
 #include "protocol.hpp"
 #include <cstring>
 #include <sstream>
+#include <string>
+#include <vector>
 
 namespace WetzelMesh
 {
@@ -24,6 +24,12 @@ namespace WetzelMesh
     int OTAManager::s_download_progress = 0;
     FirmwareVersion OTAManager::s_current_version;
     OTAManager::StatusCallback OTAManager::s_status_callback = nullptr;
+    OTAManager::SendToBorderCallback OTAManager::s_send_to_border_callback = nullptr;
+
+    void OTAManager::set_send_to_border_callback(SendToBorderCallback cb)
+    {
+        s_send_to_border_callback = cb;
+    }
 
     std::string OTAManager::get_version_string()
     {
@@ -319,7 +325,7 @@ namespace WetzelMesh
 
     void OTAManager::handle_ota_packet(const std::string &json)
     {
-        // Processa pacote OTA recebido da rede mesh
+        // Processa pacote OTA recebido da rede mesh/UART
         Protocol::Packet pkt;
         if (!Protocol::parse(json, pkt))
         {
@@ -327,12 +333,253 @@ namespace WetzelMesh
             return;
         }
 
-        if (pkt.method == "OTA_UPDATE" && pkt.type == Protocol::PacketType::REQUEST)
+        // Processa tanto OTA_UPDATE quanto OTA_START
+        if ((pkt.method == "OTA_UPDATE" || pkt.method == "OTA_START") && 
+            pkt.type == Protocol::PacketType::REQUEST)
         {
             // Extrai URL do firmware do body
-            // Formato esperado: {"firmware_url":"http://server/firmware.bin"}
-            ESP_LOGI(TAG, "Pacote OTA recebido: %s", pkt.body.c_str());
-            // Por enquanto, apenas loga
+            // Formato esperado: {"firmware_url":"http://server/firmware.bin", "version":"2.0.0", "target":"..."}
+            ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
+            ESP_LOGI(TAG, "PROCESSANDO COMANDO OTA RECEBIDO");
+            ESP_LOGI(TAG, "   Método: %s", pkt.method.c_str());
+            ESP_LOGI(TAG, "   Body: %s", pkt.body.c_str());
+            ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
+            
+            // Parse simples do body JSON
+            std::string firmware_url;
+            std::string version;
+            std::string target;
+            
+            // Extrai firmware_url
+            size_t url_pos = pkt.body.find("\"firmware_url\":\"");
+            if (url_pos != std::string::npos)
+            {
+                url_pos += 16; // Tamanho de "firmware_url":"
+                size_t url_end = pkt.body.find("\"", url_pos);
+                if (url_end != std::string::npos)
+                {
+                    firmware_url = pkt.body.substr(url_pos, url_end - url_pos);
+                }
+            }
+            
+            // Extrai version
+            size_t ver_pos = pkt.body.find("\"version\":\"");
+            if (ver_pos != std::string::npos)
+            {
+                ver_pos += 11; // Tamanho de "version":"
+                size_t ver_end = pkt.body.find("\"", ver_pos);
+                if (ver_end != std::string::npos)
+                {
+                    version = pkt.body.substr(ver_pos, ver_end - ver_pos);
+                }
+            }
+            
+            // Extrai target
+            size_t target_pos = pkt.body.find("\"target\":\"");
+            if (target_pos != std::string::npos)
+            {
+                target_pos += 10; // Tamanho de "target":"
+                size_t target_end = pkt.body.find("\"", target_pos);
+                if (target_end != std::string::npos)
+                {
+                    target = pkt.body.substr(target_pos, target_end - target_pos);
+                }
+            }
+            
+            if (!firmware_url.empty())
+            {
+                ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
+                ESP_LOGI(TAG, "INICIANDO OTA");
+                ESP_LOGI(TAG, "   URL: %s", firmware_url.c_str());
+                ESP_LOGI(TAG, "   Versão: %s", version.c_str());
+                ESP_LOGI(TAG, "   Target: %s", target.c_str());
+                ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
+                start_update(firmware_url);
+            }
+            else
+            {
+                ESP_LOGW(TAG, "Comando OTA sem firmware_url, ignorando");
+            }
+        }
+    }
+
+    void OTAManager::process_ota_commands(const std::string &json)
+    {
+        // Processa lista de comandos OTA recebidos do servidor
+        // Formato esperado: {"commands": [{"command_id":"cmd-001", "target":"gateway", "firmware_url":"...", "version":"..."}, ...]}
+        
+        ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
+        ESP_LOGI(TAG, "PROCESSANDO COMANDOS OTA DO SERVIDOR");
+        ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
+        
+        // Parse simples do JSON (pode ser melhorado com biblioteca JSON)
+        // Procura por "commands":[
+        size_t commands_pos = json.find("\"commands\":[");
+        if (commands_pos == std::string::npos)
+        {
+            ESP_LOGW(TAG, "Formato de comandos OTA inválido (não encontrou 'commands')");
+            return;
+        }
+        
+        commands_pos += 11; // Tamanho de "commands":[
+        
+        // Processa cada comando
+        size_t cmd_start = commands_pos;
+        while (true)
+        {
+            // Procura próximo objeto de comando
+            cmd_start = json.find("{", cmd_start);
+            if (cmd_start == std::string::npos)
+                break;
+            
+            size_t cmd_end = json.find("}", cmd_start);
+            if (cmd_end == std::string::npos)
+                break;
+            
+            std::string cmd_json = json.substr(cmd_start, cmd_end - cmd_start + 1);
+            
+            // Extrai campos do comando
+            std::string target;
+            std::string firmware_url;
+            std::string version;
+            std::string command_id;
+            
+            // Extrai command_id
+            size_t id_pos = cmd_json.find("\"command_id\":\"");
+            if (id_pos != std::string::npos)
+            {
+                id_pos += 15;
+                size_t id_end = cmd_json.find("\"", id_pos);
+                if (id_end != std::string::npos)
+                    command_id = cmd_json.substr(id_pos, id_end - id_pos);
+            }
+            
+            // Extrai target
+            size_t target_pos = cmd_json.find("\"target\":\"");
+            if (target_pos != std::string::npos)
+            {
+                target_pos += 10;
+                size_t target_end = cmd_json.find("\"", target_pos);
+                if (target_end != std::string::npos)
+                    target = cmd_json.substr(target_pos, target_end - target_pos);
+            }
+            
+            // Extrai firmware_url
+            size_t url_pos = cmd_json.find("\"firmware_url\":\"");
+            if (url_pos != std::string::npos)
+            {
+                url_pos += 16;
+                size_t url_end = cmd_json.find("\"", url_pos);
+                if (url_end != std::string::npos)
+                    firmware_url = cmd_json.substr(url_pos, url_end - url_pos);
+            }
+            
+            // Extrai version
+            size_t ver_pos = cmd_json.find("\"version\":\"");
+            if (ver_pos != std::string::npos)
+            {
+                ver_pos += 11;
+                size_t ver_end = cmd_json.find("\"", ver_pos);
+                if (ver_end != std::string::npos)
+                    version = cmd_json.substr(ver_pos, ver_end - ver_pos);
+            }
+            
+            if (!target.empty() && !firmware_url.empty())
+            {
+                ESP_LOGI(TAG, "Comando OTA encontrado:");
+                ESP_LOGI(TAG, "   ID: %s", command_id.c_str());
+                ESP_LOGI(TAG, "   Target: %s", target.c_str());
+                ESP_LOGI(TAG, "   URL: %s", firmware_url.c_str());
+                ESP_LOGI(TAG, "   Versão: %s", version.c_str());
+                
+                process_ota_command(target, firmware_url, version);
+            }
+            
+            cmd_start = cmd_end + 1;
+        }
+        
+        ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
+    }
+
+    void OTAManager::process_ota_command(const std::string &target, const std::string &firmware_url, const std::string &version)
+    {
+        ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
+        ESP_LOGI(TAG, "PROCESSANDO COMANDO OTA");
+        ESP_LOGI(TAG, "   Target: %s", target.c_str());
+        ESP_LOGI(TAG, "   URL: %s", firmware_url.c_str());
+        ESP_LOGI(TAG, "   Versão: %s", version.c_str());
+        ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
+        
+        if (target == "gateway")
+        {
+            // Gateway faz OTA próprio
+            if (s_isGateway)
+            {
+                ESP_LOGI(TAG, "Gateway iniciando OTA próprio...");
+                start_update(firmware_url);
+            }
+            else
+            {
+                ESP_LOGW(TAG, "Comando OTA para gateway recebido em node (ignorando)");
+            }
+        }
+        else if (target == "border" || target == "all_nodes")
+        {
+            // Distribui comando OTA para nodes via UART/mesh
+            if (s_isGateway)
+            {
+                ESP_LOGI(TAG, "Gateway distribuindo comando OTA para nodes...");
+                
+                Protocol::Packet ota_cmd;
+                ota_cmd.type = Protocol::PacketType::REQUEST;
+                ota_cmd.method = "OTA_START";
+                ota_cmd.route.src = "gateway";
+                ota_cmd.route.dst = (target == "border") ? "border" : "broadcast";
+                
+                // Cria body JSON
+                std::ostringstream body;
+                body << R"({"firmware_url":")" << firmware_url << R"(","version":")" << version << R"(","target":")" << target << "\"}";
+                ota_cmd.body = body.str();
+                
+                // Envia para border node via callback (registrado pelo gateway)
+                if (s_send_to_border_callback)
+                    s_send_to_border_callback(ota_cmd);
+                ESP_LOGI(TAG, "Comando OTA enviado para border node via UART");
+            }
+            else
+            {
+                ESP_LOGW(TAG, "Comando OTA para nodes recebido em node (deveria ser gateway)");
+            }
+        }
+        else
+        {
+            // Target é um node específico (ex: "node-01")
+            if (s_isGateway)
+            {
+                ESP_LOGI(TAG, "Gateway distribuindo comando OTA para node específico: %s", target.c_str());
+                
+                Protocol::Packet ota_cmd;
+                ota_cmd.type = Protocol::PacketType::REQUEST;
+                ota_cmd.method = "OTA_START";
+                ota_cmd.route.src = "gateway";
+                ota_cmd.route.dst = target;
+                
+                // Cria body JSON
+                std::ostringstream body;
+                body << R"({"firmware_url":")" << firmware_url << R"(","version":")" << version << R"(","target":")" << target << "\"}";
+                ota_cmd.body = body.str();
+                
+                // Envia para border node via callback (que propagará pela mesh)
+                if (s_send_to_border_callback)
+                    s_send_to_border_callback(ota_cmd);
+                ESP_LOGI(TAG, "Comando OTA enviado para node %s via border", target.c_str());
+            }
+            else
+            {
+                // Node recebeu comando OTA direto (via mesh)
+                ESP_LOGI(TAG, "Node recebeu comando OTA direto, iniciando atualização...");
+                start_update(firmware_url);
+            }
         }
     }
 

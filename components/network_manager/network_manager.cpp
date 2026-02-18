@@ -11,6 +11,7 @@
 #include "border_uart.hpp"
 #include "chunk_manager.hpp"
 #include "network_mapper.hpp"
+#include "ota_manager.hpp"
 #include "mbedtls/md5.h"
 #include <cstring>
 #include <sstream>
@@ -331,6 +332,43 @@ void NetworkManager::handle_incoming(const Protocol::Packet &packet)
         if (packet.route.dst == "broadcast")
         {
             ESP_LOGI(TAG, "Reencaminhando DISCOVERY (broadcast) para outros nodes da mesh...");
+            Router::handle_packet(packet);
+        }
+        
+        return;
+    }
+    
+    // Processa comandos OTA_START
+    if (packet.type == Protocol::PacketType::REQUEST && packet.method == "OTA_START")
+    {
+        ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
+        ESP_LOGI(TAG, "COMANDO OTA_START RECEBIDO");
+        ESP_LOGI(TAG, "   De: %s", packet.route.src.c_str());
+        ESP_LOGI(TAG, "   Para: %s", packet.route.dst.c_str());
+        ESP_LOGI(TAG, "   Body: %s", packet.body.c_str());
+        ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
+        
+        // Verifica se o comando é para este node ou para broadcast/all_nodes
+        std::string my_id = BLETransport::node_id();
+        bool is_for_me = (packet.route.dst == my_id || 
+                         packet.route.dst == "broadcast" || 
+                         packet.route.dst == "all_nodes");
+        
+        if (is_for_me)
+        {
+            // Processa comando OTA
+            std::string json = Protocol::serialize(packet);
+            OTAManager::handle_ota_packet(json);
+        }
+        else
+        {
+            // Comando não é para este node, apenas reencaminha
+            ESP_LOGI(TAG, "Comando OTA não é para este node (%s), reencaminhando...", my_id.c_str());
+        }
+        
+        // Reencaminha comando OTA para outros nodes (se broadcast ou all_nodes)
+        if (packet.route.dst == "broadcast" || packet.route.dst == "all_nodes")
+        {
             Router::handle_packet(packet);
         }
         

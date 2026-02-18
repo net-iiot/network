@@ -5,6 +5,7 @@
 #include "protocol.hpp"
 #include "network_manager.hpp"
 #include "network_mapper.hpp"
+#include "ota_manager.hpp"
 #include "esp_bt.h"
 #include "led_manager.hpp"
 #include "freertos/FreeRTOS.h"
@@ -23,6 +24,7 @@
 #include <cassert>
 #include <cstdlib>
 #include <ctime>
+#include <sstream>
 
 namespace WetzelMesh
 {
@@ -523,6 +525,14 @@ namespace WetzelMesh
 
         // Task para reconexão WiFi (não bloqueia handlers)
         xTaskCreatePinnedToCore(wifi_reconnect_task, "wifi_reconnect", 2048, nullptr, 3, nullptr, tskNO_AFFINITY);
+
+        // Task de polling unificada: map + OTA commands
+        xTaskCreatePinnedToCore(polling_task, "gw_polling", 8192, nullptr, 4, nullptr, tskNO_AFFINITY);
+
+        // Registra callback no OTAManager para que ele possa enviar para border
+        OTAManager::set_send_to_border_callback([](const Protocol::Packet &pkt) {
+            return Gateway::send_to_border(pkt);
+        });
 
         ESP_LOGI(TAG, "Gateway inicializado (UART TX=%d RX=%d, Server=%s).", kTxPin, kRxPin, s_server_url.c_str());
     }
@@ -1164,6 +1174,174 @@ namespace WetzelMesh
             vTaskDelay(pdMS_TO_TICKS(60000)); // A cada 1 minuto
             HttpContextManager::instance().cleanup_old_contexts(300000); // 5 minutos
         }
+    }
+
+    static void check_ota_commands();
+
+    void Gateway::polling_task(void *)
+    {
+        ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
+        ESP_LOGI(TAG, "TASK DE POLLING UNIFICADA INICIADA");
+        ESP_LOGI(TAG, "   - Envio periódico de map para servidor");
+        ESP_LOGI(TAG, "   - Verificação de comandos OTA do servidor");
+        ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
+        
+        // Aguarda alguns segundos para rede estabilizar
+        vTaskDelay(pdMS_TO_TICKS(10000)); // 10 segundos
+        
+        uint64_t last_map_send_ms = 0;
+        uint64_t last_ota_check_ms = 0;
+        const uint32_t map_send_interval_ms = 300000;  // 5 minutos
+        const uint32_t ota_check_interval_ms = 30000;  // 30 segundos
+        
+        for (;;)
+        {
+            uint64_t now_ms = esp_timer_get_time() / 1000ULL;
+            
+            // 1. Envia map periodicamente (se houver map disponível)
+            if ((now_ms - last_map_send_ms) >= map_send_interval_ms)
+            {
+                NetworkMap last_map = NetworkMapper::get_last_map();
+                if (last_map.nodes.size() > 0 || last_map.connectivity.connections.size() > 0)
+                {
+                    ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
+                    ESP_LOGI(TAG, "POLLING: Enviando map para servidor");
+                    ESP_LOGI(TAG, "   Nodes: %u", (unsigned)last_map.nodes.size());
+                    ESP_LOGI(TAG, "   Conexões: %u", (unsigned)last_map.connectivity.connections.size());
+                    ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
+                    
+                    // Constrói JSON com o mapeamento completo
+                    std::string json = "{";
+                    json += "\"mapped_at_ms\":" + std::to_string(last_map.mapped_at_ms) + ",";
+                    json += "\"nodes\":[";
+                    
+                    bool first = true;
+                    for (const auto &node : last_map.nodes)
+                    {
+                        if (!first) json += ",";
+                        first = false;
+                        
+                        json += "{";
+                        json += "\"node_id\":\"" + node.node_id + "\",";
+                        if (!node.node_name.empty())
+                            json += "\"node_name\":\"" + node.node_name + "\",";
+                        json += "\"node_type\":\"" + (node.node_type.empty() ? "normal" : node.node_type) + "\",";
+                        json += "\"rssi\":" + std::to_string(node.rssi) + ",";
+                        json += "\"discovered_at_ms\":" + std::to_string(node.discovered_at_ms) + ",";
+                        json += "\"position_x\":" + std::to_string(node.position_x) + ",";
+                        json += "\"position_y\":" + std::to_string(node.position_y) + ",";
+                        json += "\"neighbors_count\":" + std::to_string(node.neighbors.size());
+                        json += "}";
+                    }
+                    
+                    json += "],";
+                    json += "\"connectivity\":{\"connections\":[";
+
+                    first = true;
+                    for (const auto &conn : last_map.connectivity.connections)
+                    {
+                        if (!first) json += ",";
+                        first = false;
+
+                        json += "{";
+                        json += "\"from_node_id\":\"" + conn.from_node_id + "\",";
+                        json += "\"to_node_id\":\"" + conn.to_node_id + "\",";
+                        json += "\"rssi\":" + std::to_string(conn.rssi) + ",";
+                        json += "\"is_direct\":" + std::string(conn.is_direct ? "true" : "false") + ",";
+                        json += "\"last_communication_ms\":" + std::to_string(conn.last_communication_ms) + ",";
+                        json += "\"packet_count\":" + std::to_string(conn.packet_count);
+                        json += "}";
+                    }
+
+                    json += "]}";
+                    json += "}";
+                    
+                    // Envia para o servidor via HTTP
+                    Protocol::Packet map_packet{};
+                    map_packet.type = Protocol::PacketType::REQUEST;
+                    map_packet.method = "POST";
+                    map_packet.route.src = "gateway";
+                    map_packet.route.dst = "server";
+                    map_packet.endpoint = "/api/network/map";
+                    map_packet.body = json;
+                    
+                    send_http_request(map_packet);
+                    last_map_send_ms = now_ms;
+                }
+                else
+                {
+                    ESP_LOGD(TAG, "POLLING: Map vazio, pulando envio");
+                }
+            }
+            
+            // 2. Verifica comandos OTA do servidor
+            if ((now_ms - last_ota_check_ms) >= ota_check_interval_ms)
+            {
+                ESP_LOGI(TAG, "POLLING: Verificando comandos OTA do servidor...");
+                check_ota_commands();
+                last_ota_check_ms = now_ms;
+            }
+            
+            // Aguarda 1 segundo antes da próxima iteração
+            vTaskDelay(pdMS_TO_TICKS(1000));
+        }
+    }
+    
+    static void check_ota_commands()
+    {
+        // Verifica se há comandos OTA pendentes no servidor
+        std::string commands_url = Gateway::get_server_url() + "/api/firmware/ota/commands?gateway_id=gateway";
+
+        std::string response_body;
+
+        // Usa event handler para capturar o body da resposta
+        auto ota_http_event = [](esp_http_client_event_t *evt) -> esp_err_t {
+            if (evt->event_id == HTTP_EVENT_ON_DATA && evt->user_data)
+            {
+                std::string *body = static_cast<std::string *>(evt->user_data);
+                body->append((char *)evt->data, evt->data_len);
+            }
+            return ESP_OK;
+        };
+
+        esp_http_client_config_t config = {};
+        config.url = commands_url.c_str();
+        config.timeout_ms = 5000;
+        config.event_handler = ota_http_event;
+        config.user_data = &response_body;
+
+        esp_http_client_handle_t client = esp_http_client_init(&config);
+        if (!client)
+        {
+            ESP_LOGW(TAG, "Falha ao criar cliente HTTP para verificar comandos OTA");
+            return;
+        }
+
+        esp_err_t err = esp_http_client_perform(client);
+        if (err == ESP_OK)
+        {
+            int status_code = esp_http_client_get_status_code(client);
+
+            if (status_code == 200 && !response_body.empty())
+            {
+                ESP_LOGI(TAG, "Comandos OTA recebidos: %s", response_body.c_str());
+                OTAManager::process_ota_commands(response_body);
+            }
+            else if (status_code == 200)
+            {
+                ESP_LOGD(TAG, "Nenhum comando OTA pendente");
+            }
+            else
+            {
+                ESP_LOGW(TAG, "Erro ao verificar comandos OTA (status: %d)", status_code);
+            }
+        }
+        else
+        {
+            ESP_LOGW(TAG, "Erro ao verificar comandos OTA: %s", esp_err_to_name(err));
+        }
+
+        esp_http_client_cleanup(client);
     }
 
 } // namespace WetzelMesh
