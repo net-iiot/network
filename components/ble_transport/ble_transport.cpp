@@ -163,11 +163,12 @@ void BLETransport::handle_button_write(const uint8_t *data, uint16_t len)
     out.route.dst  = "gateway";
 
     // Body JSON com todos os campos relevantes
-    out.body["button_id"]   = std::string(btn_id);
-    out.body["event_type"]  = static_cast<int>(pkt.event_type);
-    out.body["event_name"]  = std::string(event_name);
-    out.body["battery_pct"] = static_cast<int>(pkt.battery_pct);
-    out.body["node_id"]     = node_id(); // node que recebeu o sinal
+    char body_buf[256];
+    snprintf(body_buf, sizeof(body_buf),
+             "{\"button_id\":\"%s\",\"event_type\":%d,\"event_name\":\"%s\",\"battery_pct\":%d,\"node_id\":\"%s\"}",
+             btn_id, static_cast<int>(pkt.event_type), event_name,
+             static_cast<int>(pkt.battery_pct), node_id().c_str());
+    out.body = std::string(body_buf);
 
     Router::handle_packet(out);
 }

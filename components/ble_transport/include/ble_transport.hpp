@@ -57,16 +57,17 @@ namespace WetzelMesh
         static bool isGateway() { return s_isGateway; }
         static std::string node_id();
 
-    private:
-        static void start_gap_gatt();
-        static void start_advertising();
-        static void notify_tx(const std::string &data);
-        static void handle_button_write(const uint8_t *data, uint16_t len);
-
+        // Acessados pelos handlers GATTS/GAP (funções C estáticas fora da classe)
         static bool     s_isGateway;
         static uint16_t s_service_handle;
         static uint16_t s_rx_char_handle;
         static uint16_t s_button_char_handle;
+        static void start_advertising();
+        static void handle_button_write(const uint8_t *data, uint16_t len);
+
+    private:
+        static void start_gap_gatt();
+        static void notify_tx(const std::string &data);
     };
 
 } // namespace WetzelMesh
