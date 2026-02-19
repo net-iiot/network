@@ -1125,11 +1125,17 @@ namespace WetzelMesh
         
         // Cria contexto
         std::string request_id = HttpContextManager::instance().create_context(request_pkt, s_server_url);
-        
-        // Constrói URL completa
-        std::string full_url = s_server_url + request_pkt.endpoint;
-        
-        ESP_LOGI(TAG, "Enviando requisição HTTP: %s %s", request_pkt.method.c_str(), full_url.c_str());
+
+        // Gateway burro: SEMPRE envia para /api/packet
+        // O network_service no servidor interpreta e roteia
+        std::string full_url = s_server_url + "/api/packet";
+
+        // Serializa o pacote COMPLETO como JSON para o body
+        std::string packet_json = Protocol::serialize(request_pkt);
+
+        ESP_LOGI(TAG, "Enviando pacote para network_service: method=%s src=%s dst=%s endpoint=%s",
+                 request_pkt.method.c_str(), request_pkt.route.src.c_str(),
+                 request_pkt.route.dst.c_str(), request_pkt.endpoint.c_str());
         
         // Cria estrutura de dados para callback (alocada dinamicamente)
         // Nota: O callback HTTP pode ser assíncrono, então mantemos o ponteiro
@@ -1152,24 +1158,17 @@ namespace WetzelMesh
             HttpContextManager::instance().remove_context(request_id);
             return false;
         }
-        
-        // Configura método HTTP
-        esp_http_client_set_method(client, 
-            (request_pkt.method == "POST") ? HTTP_METHOD_POST :
-            (request_pkt.method == "PUT") ? HTTP_METHOD_PUT :
-            (request_pkt.method == "DELETE") ? HTTP_METHOD_DELETE :
-            HTTP_METHOD_GET);
-        
+
+        // Gateway burro: sempre POST para enviar pacote completo
+        esp_http_client_set_method(client, HTTP_METHOD_POST);
+
         // Adiciona headers
         esp_http_client_set_header(client, "Content-Type", "application/json");
         esp_http_client_set_header(client, "X-Request-ID", request_id.c_str());
         esp_http_client_set_header(client, "X-Original-Src", request_pkt.route.src.c_str());
-        
-        // Se tem body, adiciona
-        if (!request_pkt.body.empty())
-        {
-            esp_http_client_set_post_field(client, request_pkt.body.c_str(), request_pkt.body.length());
-        }
+
+        // Envia o pacote COMPLETO serializado como body
+        esp_http_client_set_post_field(client, packet_json.c_str(), packet_json.length());
         
         // Executa requisição
         esp_err_t err = esp_http_client_perform(client);
