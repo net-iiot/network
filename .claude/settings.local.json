@@ -2,7 +2,14 @@
   "permissions": {
     "allow": [
       "Bash(go build:*)",
-      "Bash(go vet:*)"
+      "Bash(go vet:*)",
+      "Bash(idf.py build:*)",
+      "Bash(flutter pub get:*)",
+      "Bash(flutter --version:*)",
+      "Bash(find:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git config:*)"
     ]
   }
 }
