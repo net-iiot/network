@@ -496,7 +496,7 @@ void NetworkManager::start_hello_task()
             vTaskDelay(pdMS_TO_TICKS(2000));
         }
     };
-    xTaskCreatePinnedToCore(hello_task, "hello_task", 4096, nullptr, 4, nullptr, tskNO_AFFINITY);
+    xTaskCreatePinnedToCore(hello_task, "hello_task", 6144, nullptr, 4, nullptr, tskNO_AFFINITY);
 }
 
 void NetworkManager::on_hello(const Protocol::Packet &hello_packet, int rssi)
