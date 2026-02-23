@@ -485,7 +485,7 @@ namespace WetzelMesh
             size_t id_pos = cmd_json.find("\"command_id\":\"");
             if (id_pos != std::string::npos)
             {
-                id_pos += 15;
+                id_pos += 14;
                 size_t id_end = cmd_json.find("\"", id_pos);
                 if (id_end != std::string::npos)
                     command_id = cmd_json.substr(id_pos, id_end - id_pos);
