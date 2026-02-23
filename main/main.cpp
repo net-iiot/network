@@ -35,6 +35,7 @@ extern "C" void app_main(void)
     esp_log_level_set("BORDER_UART", ESP_LOG_INFO);
     esp_log_level_set("NETMAN", ESP_LOG_INFO);
     esp_log_level_set("ESPNOW", ESP_LOG_INFO);
+    esp_log_level_set("BLE", ESP_LOG_INFO);
     
     // Delay para garantir que o monitor está pronto
     vTaskDelay(pdMS_TO_TICKS(500));
