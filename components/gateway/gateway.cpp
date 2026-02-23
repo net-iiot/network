@@ -514,7 +514,7 @@ namespace WetzelMesh
 
         // RX pela UART (GW <- Nó)
         ESP_LOGI(TAG, "Criando task de escuta UART...");
-        xTaskCreatePinnedToCore(uart_listen_task, "gw_uart_rx", 4096, nullptr, 5, nullptr, tskNO_AFFINITY);
+        xTaskCreatePinnedToCore(uart_listen_task, "gw_uart_rx", 8192, nullptr, 5, nullptr, tskNO_AFFINITY);
         ESP_LOGI(TAG, "Task de escuta UART criada! Gateway pronto para receber conexões.");
 
         // Task para processar requisições HTTP

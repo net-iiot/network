@@ -374,14 +374,14 @@ namespace WetzelMesh
             if (already_in_path)
             {
                 ESP_LOGW(TAG, "Loop detectado: border node já está no path, descartando pacote");
-                return;
+                continue;
             }
-            
+
             // Verificar TTL antes de processar
             if (updated_pkt.ttl == 0)
             {
                 ESP_LOGW(TAG, "TTL expirado, descartando pacote");
-                return;
+                continue;
             }
             
             // Decrementa TTL e adiciona node ao path
