@@ -161,7 +161,7 @@ void BLETransport::handle_button_write(const uint8_t *data, uint16_t len)
     out.type   = Protocol::PacketType::EVENT;
     out.method = "BUTTON_EVENT";
     out.route.src  = std::string(btn_id);
-    out.route.dst  = "server";
+    out.route.dst  = "gateway";
 
     // Body JSON com todos os campos relevantes
     char body_buf[256];

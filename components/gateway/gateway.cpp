@@ -773,13 +773,9 @@ namespace WetzelMesh
                 }
             }
 
-            if (pkt.route.dst == "server" ||
-                pkt.type == Protocol::PacketType::REQUEST)
-            {
-                // Requisição HTTP - processa via cliente HTTP
-                ESP_LOGI(TAG, "Requisição HTTP recebida: %s %s", pkt.method.c_str(), pkt.endpoint.c_str());
-                send_http_request(pkt);
-            }
+            // Tudo que não foi tratado internamente vai para o servidor
+            ESP_LOGI(TAG, "Encaminhando ao servidor: method=%s dst=%s", pkt.method.c_str(), pkt.route.dst.c_str());
+            send_http_request(pkt);
         }
     }
 
