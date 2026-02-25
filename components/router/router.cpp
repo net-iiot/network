@@ -8,6 +8,7 @@
 #include "border_uart.hpp"
 #include "esp_timer.h"
 #include "esp_log.h"
+#include "esp_random.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -107,14 +108,14 @@ namespace WetzelMesh
             hop.transport = "MESH";
             updated_pkt.trace.hop_history.push_back(hop);
             
-            // Node recebeu dado da mesh - mantém LED aceso durante 1 segundo antes de repassar
-            ESP_LOGI(TAG, "Node %s recebeu dado da mesh (hop %u) - mantendo LED aceso por 1 segundo antes de repassar...", 
-                     current_node_id.c_str(), updated_pkt.trace.hop_count);
-            LedManager::set_led_on_for_duration(1000); // Mantém LED aceso por 1 segundo
-            vTaskDelay(pdMS_TO_TICKS(1000)); // Aguarda 1 segundo
-            
-            // Envia pela malha; lógica "borda→UART" agora está em NetworkManager::send()
-            ESP_LOGI(TAG, "Repassando dado após 1 segundo...");
+            // Backoff aleatório (50-200ms) para evitar colisões de broadcast
+            uint32_t backoff_ms = 50 + (esp_random() % 151);
+            ESP_LOGI(TAG, "Node %s recebeu dado da mesh (hop %u) - backoff %ums antes de repassar",
+                     current_node_id.c_str(), updated_pkt.trace.hop_count, (unsigned)backoff_ms);
+            LedManager::set_led_on_for_duration(backoff_ms);
+            vTaskDelay(pdMS_TO_TICKS(backoff_ms));
+
+            ESP_LOGI(TAG, "Repassando dado após backoff...");
             // LED pisca dentro de ESPNOWTransport::send() quando envia
             ESPNOWTransport::send(updated_pkt);
             return;
