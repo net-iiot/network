@@ -11,32 +11,30 @@
 #include "freertos/task.h"
 #include <algorithm>
 
-namespace WetzelMesh
+namespace NetworkMesh
 {
     static const char *TAG = "NETMAP";
 
     bool NetworkMapper::s_isGateway = false;
     bool NetworkMapper::s_mapping_in_progress = false;
     uint32_t NetworkMapper::s_periodic_interval_seconds = 0;
-    uint32_t NetworkMapper::s_periodic_map_send_interval_seconds = 300; // Padrão: 5 minutos
+    uint32_t NetworkMapper::s_periodic_map_send_interval_seconds = 300;
     NetworkMap NetworkMapper::s_last_map;
     std::map<std::string, NodeMappingInfo> NetworkMapper::s_collected_nodes;
     uint64_t NetworkMapper::s_mapping_start_time = 0;
-    uint32_t NetworkMapper::s_mapping_timeout_ms = 10000; // 10 segundos para coletar respostas
+    uint32_t NetworkMapper::s_mapping_timeout_ms = 10000;
 
     void NetworkMapper::init(bool isGateway)
     {
         s_isGateway = isGateway;
         ESP_LOGI(TAG, "NetworkMapper inicializado (Gateway: %s)", isGateway ? "SIM" : "NÃO");
-        
+
         if (isGateway)
         {
-            // Gateway: cria task de mapeamento
             xTaskCreatePinnedToCore(mapping_task, "netmap_task", 8192, nullptr, 4, nullptr, tskNO_AFFINITY);
-            
-            // Dispara mapeamento inicial após alguns segundos
+
             auto initial_mapping = [](void *) {
-                vTaskDelay(pdMS_TO_TICKS(5000)); // Aguarda 5 segundos para rede estabilizar
+                vTaskDelay(pdMS_TO_TICKS(5000));
                 ESP_LOGI(TAG, "Disparando mapeamento inicial...");
                 trigger_mapping();
                 vTaskDelete(nullptr);
@@ -62,12 +60,11 @@ namespace WetzelMesh
         ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
         ESP_LOGI(TAG, "INICIANDO MAPEAMENTO DA REDE");
         ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
-        
+
         s_mapping_in_progress = true;
         s_collected_nodes.clear();
         s_mapping_start_time = esp_timer_get_time() / 1000ULL;
-        
-        // Envia pacote DISCOVERY via UART para border node
+
         send_discovery_packet();
     }
 
@@ -98,7 +95,7 @@ namespace WetzelMesh
 
         if (response.type != Protocol::PacketType::RESPONSE || response.method != "DISCOVERY_RESPONSE")
         {
-            ESP_LOGW(TAG, "DISCOVERY_RESPONSE ignorada: tipo ou método incorreto (type=%d, method=%s)", 
+            ESP_LOGW(TAG, "DISCOVERY_RESPONSE ignorada: tipo ou método incorreto (type=%d, method=%s)",
                      (int)response.type, response.method.c_str());
             return;
         }
@@ -113,8 +110,7 @@ namespace WetzelMesh
         NodeMappingInfo node_info;
         node_info.node_id = response.route.src;
         node_info.discovered_at_ms = esp_timer_get_time() / 1000ULL;
-        
-        // Extrai informações da topologia
+
         if (!response.topology.node_id.empty())
         {
             node_info.node_id = response.topology.node_id;
@@ -127,7 +123,6 @@ namespace WetzelMesh
         node_info.gateway_id = response.topology.gateway_id;
         node_info.neighbors = response.topology.neighbors;
 
-        // Extrai informações do node_info
         if (!response.topology.node_info.node_id.empty())
         {
             node_info.node_id = response.topology.node_info.node_id;
@@ -138,46 +133,38 @@ namespace WetzelMesh
             node_info.position_y = response.topology.node_info.position_y;
         }
 
-        // Extrai RSSI do trace se disponível
         if (!response.trace.hop_history.empty())
         {
             node_info.rssi = response.trace.hop_history.back().rssi;
         }
 
-        // ✅ CORREÇÃO: Normaliza node_id do border node para evitar duplicação
-        // Se o node_type é "border", sempre usa "border" como node_id
         if (node_info.node_type == "border")
         {
             ESP_LOGI(TAG, "Normalizando node_id do border node: %s -> border", node_info.node_id.c_str());
             node_info.node_id = "border";
         }
 
-        // ✅ CORREÇÃO: Verifica se já existe um node com este ID antes de adicionar
-        // Se já existe, atualiza ao invés de criar duplicata
         if (s_collected_nodes.find(node_info.node_id) != s_collected_nodes.end())
         {
-            ESP_LOGW(TAG, "⚠️ Node %s já existe na coleta, atualizando informações...", node_info.node_id.c_str());
-            // Atualiza informações mantendo dados existentes que podem ser mais recentes
+            ESP_LOGW(TAG, "Node %s já existe na coleta, atualizando informações...", node_info.node_id.c_str());
             NodeMappingInfo &existing = s_collected_nodes[node_info.node_id];
-            // Atualiza apenas campos que mudaram ou estão vazios
             if (!node_info.node_name.empty())
                 existing.node_name = node_info.node_name;
             if (!node_info.node_type.empty())
                 existing.node_type = node_info.node_type;
-            existing.neighbors = node_info.neighbors; // Atualiza vizinhos
+            existing.neighbors = node_info.neighbors;
             existing.has_gateway = node_info.has_gateway;
             existing.gateway_id = node_info.gateway_id;
-            if (node_info.rssi != 0) // Atualiza RSSI se disponível
+            if (node_info.rssi != 0)
                 existing.rssi = node_info.rssi;
-            existing.discovered_at_ms = node_info.discovered_at_ms; // Atualiza timestamp
+            existing.discovered_at_ms = node_info.discovered_at_ms;
         }
         else
         {
-            // Novo node, adiciona normalmente
             s_collected_nodes[node_info.node_id] = node_info;
         }
-        ESP_LOGI(TAG, "Node mapeado: %s (nome: %s, tipo: %s, vizinhos: %u)", 
-                 node_info.node_id.c_str(), 
+        ESP_LOGI(TAG, "Node mapeado: %s (nome: %s, tipo: %s, vizinhos: %u)",
+                 node_info.node_id.c_str(),
                  node_info.node_name.empty() ? "(sem nome)" : node_info.node_name.c_str(),
                  node_info.node_type.empty() ? "normal" : node_info.node_type.c_str(),
                  (unsigned)node_info.neighbors.size());
@@ -199,14 +186,13 @@ namespace WetzelMesh
         discovery.route.dst = "broadcast";
         discovery.endpoint = "/network/map";
         discovery.body = R"({"action":"discover"})";
-        
-        // Preencher trace
+
         uint64_t now_ms = esp_timer_get_time() / 1000ULL;
         discovery.trace.packet_id = Protocol::generate_packet_id();
         discovery.trace.created_at_ms = now_ms;
         discovery.trace.path.push_back("gateway");
         discovery.routing_strategy = "flooding";
-        discovery.ttl = 50; // TTL aumentado para suportar redes maiores
+        discovery.ttl = 50;
 
         Protocol::HopInfo hop;
         hop.node_id = "gateway";
@@ -227,8 +213,7 @@ namespace WetzelMesh
         ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
         ESP_LOGI(TAG, "Construindo matriz de conectividade");
         ESP_LOGI(TAG, "Nodes coletados antes: %u", (unsigned)s_collected_nodes.size());
-        
-        // Adiciona GATEWAY ao mapa (sempre presente quando é gateway)
+
         std::string gateway_node_id = "gateway";
         if (s_collected_nodes.find(gateway_node_id) == s_collected_nodes.end())
         {
@@ -237,23 +222,19 @@ namespace WetzelMesh
             gateway_node.node_id = gateway_node_id;
             gateway_node.node_name = "Gateway";
             gateway_node.node_type = "gateway";
-            gateway_node.has_gateway = false; // Gateway não tem gateway acima dele
+            gateway_node.has_gateway = false;
             gateway_node.discovered_at_ms = esp_timer_get_time() / 1000ULL;
             gateway_node.rssi = 0;
             s_collected_nodes[gateway_node_id] = gateway_node;
             ESP_LOGI(TAG, "Gateway adicionado ao mapa");
         }
-        
-        // Adiciona border node automaticamente se UART estiver conectado
-        // O border node está sempre presente quando há comunicação UART
-        // Como o gateway não tem acesso direto ao node_id do border, vamos usar "border" como ID
-        // ✅ CORREÇÃO: Só adiciona se não foi coletado via DISCOVERY_RESPONSE
+
         if (LedManager::get_gateway_uart_connected())
         {
             std::string border_node_id = "border";
             if (s_collected_nodes.find(border_node_id) == s_collected_nodes.end())
             {
-                ESP_LOGI(TAG, "Adicionando border node automaticamente: %s (não foi coletado via DISCOVERY_RESPONSE)", border_node_id.c_str());
+                ESP_LOGI(TAG, "Adicionando border node automaticamente: %s", border_node_id.c_str());
                 NodeMappingInfo border_node;
                 border_node.node_id = border_node_id;
                 border_node.node_name = "Border Node";
@@ -261,56 +242,49 @@ namespace WetzelMesh
                 border_node.has_gateway = true;
                 border_node.gateway_id = "gateway";
                 border_node.discovered_at_ms = esp_timer_get_time() / 1000ULL;
-                border_node.rssi = 0; // UART não tem RSSI
-                
-                // Nota: Os vizinhos do border serão adicionados quando recebermos DISCOVERY_RESPONSE dele
-                // ou quando ele responder ao DISCOVERY
-                
+                border_node.rssi = 0;
+
                 s_collected_nodes[border_node_id] = border_node;
                 ESP_LOGI(TAG, "Border node adicionado ao mapa");
             }
             else
             {
-                ESP_LOGI(TAG, "Border node já foi coletado via DISCOVERY_RESPONSE, não adicionando automaticamente");
+                ESP_LOGI(TAG, "Border node já foi coletado via DISCOVERY_RESPONSE");
             }
         }
-        
+
         ESP_LOGI(TAG, "Total de nodes após adicionar gateway e border: %u", (unsigned)s_collected_nodes.size());
-        
-        // Log detalhado de todos os nodes
+
         for (const auto &pair : s_collected_nodes)
         {
             const NodeMappingInfo &node = pair.second;
-            ESP_LOGI(TAG, "  - Node: %s (tipo: %s, vizinhos: %u)", 
-                     node.node_id.c_str(), 
+            ESP_LOGI(TAG, "  - Node: %s (tipo: %s, vizinhos: %u)",
+                     node.node_id.c_str(),
                      node.node_type.empty() ? "normal" : node.node_type.c_str(),
                      (unsigned)node.neighbors.size());
         }
 
-        // Constrói matriz de conectividade baseado nos neighbors de cada node
         for (const auto &pair : s_collected_nodes)
         {
             const NodeMappingInfo &node = pair.second;
-            
-            // Adiciona conexões do gateway para border (se border node foi mapeado)
+
             if (node.has_gateway && !node.gateway_id.empty())
             {
                 Protocol::Connection conn{};
                 conn.from_node_id = node.gateway_id;
                 conn.to_node_id = node.node_id;
-                conn.rssi = node.rssi; // UART não tem RSSI, mas mantém 0
+                conn.rssi = node.rssi;
                 conn.is_direct = true;
                 conn.last_communication_ms = node.discovered_at_ms;
-                conn.packet_count = 1; // Será atualizado pelo microserviço
-                
-                ESP_LOGI(TAG, "Conexão gateway->border: %s -> %s, rssi=%d, packet_count=%u", 
-                         conn.from_node_id.c_str(), conn.to_node_id.c_str(), 
+                conn.packet_count = 1;
+
+                ESP_LOGI(TAG, "Conexão gateway->border: %s -> %s, rssi=%d, packet_count=%u",
+                         conn.from_node_id.c_str(), conn.to_node_id.c_str(),
                          conn.rssi, conn.packet_count);
-                
+
                 s_last_map.connectivity.connections.push_back(conn);
             }
 
-            // Adiciona conexões deste node para seus vizinhos
             for (const auto &neighbor : node.neighbors)
             {
                 Protocol::Connection conn{};
@@ -319,24 +293,23 @@ namespace WetzelMesh
                 conn.rssi = neighbor.rssi;
                 conn.is_direct = true;
                 conn.last_communication_ms = neighbor.last_seen_ms;
-                conn.packet_count = 1; // Será atualizado pelo microserviço
-                
-                ESP_LOGI(TAG, "Conexão node->neighbor: %s -> %s, rssi=%d, packet_count=%u", 
-                         conn.from_node_id.c_str(), conn.to_node_id.c_str(), 
+                conn.packet_count = 1;
+
+                ESP_LOGI(TAG, "Conexão node->neighbor: %s -> %s, rssi=%d, packet_count=%u",
+                         conn.from_node_id.c_str(), conn.to_node_id.c_str(),
                          conn.rssi, conn.packet_count);
-                
+
                 s_last_map.connectivity.connections.push_back(conn);
             }
         }
 
-        // Remove duplicatas de conexões (mesma origem e destino)
         std::vector<Protocol::Connection> unique_connections;
         for (const auto &conn : s_last_map.connectivity.connections)
         {
             bool is_duplicate = false;
             for (const auto &existing : unique_connections)
             {
-                if (existing.from_node_id == conn.from_node_id && 
+                if (existing.from_node_id == conn.from_node_id &&
                     existing.to_node_id == conn.to_node_id)
                 {
                     is_duplicate = true;
@@ -349,12 +322,11 @@ namespace WetzelMesh
             }
         }
         s_last_map.connectivity.connections = unique_connections;
-        
-        // Conta gateways, nodes e conexões
+
         size_t gateway_count = 0;
         size_t border_count = 0;
         size_t normal_node_count = 0;
-        
+
         for (const auto &pair : s_collected_nodes)
         {
             if (pair.second.node_type == "gateway")
@@ -364,7 +336,7 @@ namespace WetzelMesh
             else
                 normal_node_count++;
         }
-        
+
         ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
         ESP_LOGI(TAG, "RESUMO DO MAPA:");
         ESP_LOGI(TAG, "  Gateways: %u", (unsigned)gateway_count);
@@ -377,38 +349,35 @@ namespace WetzelMesh
 
     void NetworkMapper::send_map_to_server(const NetworkMap &map)
     {
-        // Log antes de serializar para debug
         ESP_LOGI(TAG, "Preparando envio: %u conexões no mapa", (unsigned)map.connectivity.connections.size());
         for (size_t i = 0; i < map.connectivity.connections.size(); i++)
         {
             const auto &conn = map.connectivity.connections[i];
-            ESP_LOGI(TAG, "Conexão[%u]: %s -> %s, packet_count=%u, rssi=%d, last_comm=%llu", 
-                     (unsigned)i, conn.from_node_id.c_str(), conn.to_node_id.c_str(), 
+            ESP_LOGI(TAG, "Conexão[%u]: %s -> %s, packet_count=%u, rssi=%d, last_comm=%llu",
+                     (unsigned)i, conn.from_node_id.c_str(), conn.to_node_id.c_str(),
                      conn.packet_count, conn.rssi, conn.last_communication_ms);
         }
-        
-        // Constrói JSON com o mapeamento completo
+
         std::string json = "{";
         json += "\"mapped_at_ms\":" + std::to_string(map.mapped_at_ms) + ",";
         json += "\"nodes\":[";
-        
+
         bool first = true;
         ESP_LOGI(TAG, "Serializando %u nodes para JSON...", (unsigned)s_collected_nodes.size());
         for (const auto &pair : s_collected_nodes)
         {
             if (!first) json += ",";
             first = false;
-            
+
             const NodeMappingInfo &node = pair.second;
-            ESP_LOGI(TAG, "  Serializando node: %s (tipo: %s)", 
-                     node.node_id.c_str(), 
+            ESP_LOGI(TAG, "  Serializando node: %s (tipo: %s)",
+                     node.node_id.c_str(),
                      node.node_type.empty() ? "normal" : node.node_type.c_str());
-            
+
             json += "{";
             json += "\"node_id\":\"" + node.node_id + "\",";
             if (!node.node_name.empty())
                 json += "\"node_name\":\"" + node.node_name + "\",";
-            // Sempre inclui node_type (gateway, border, ou normal)
             json += "\"node_type\":\"" + (node.node_type.empty() ? "normal" : node.node_type) + "\",";
             json += "\"rssi\":" + std::to_string(node.rssi) + ",";
             json += "\"discovered_at_ms\":" + std::to_string(node.discovered_at_ms) + ",";
@@ -417,21 +386,20 @@ namespace WetzelMesh
             json += "\"neighbors_count\":" + std::to_string(node.neighbors.size());
             json += "}";
         }
-        
+
         json += "],";
         json += "\"connectivity\":{";
         json += "\"connections\":[";
-        
+
         first = true;
         for (const auto &conn : map.connectivity.connections)
         {
             if (!first) json += ",";
             first = false;
-            
-            // Log antes de adicionar ao JSON
-            ESP_LOGI(TAG, "Serializando conexão: %s -> %s, packet_count=%u", 
+
+            ESP_LOGI(TAG, "Serializando conexão: %s -> %s, packet_count=%u",
                      conn.from_node_id.c_str(), conn.to_node_id.c_str(), conn.packet_count);
-            
+
             json += "{";
             json += "\"from_node_id\":\"" + conn.from_node_id + "\",";
             json += "\"to_node_id\":\"" + conn.to_node_id + "\",";
@@ -441,14 +409,13 @@ namespace WetzelMesh
             json += "\"packet_count\":" + std::to_string(conn.packet_count);
             json += "}";
         }
-        
+
         json += "]";
         json += "}";
         json += "}";
 
         ESP_LOGI(TAG, "JSON gerado (%u bytes)", (unsigned)json.size());
 
-        // Envia para o servidor via HTTP
         Protocol::Packet map_packet{};
         map_packet.type = Protocol::PacketType::REQUEST;
         map_packet.method = "POST";
@@ -464,18 +431,13 @@ namespace WetzelMesh
     void NetworkMapper::mapping_task(void *param)
     {
         ESP_LOGI(TAG, "Task de mapeamento iniciada");
-        
+
         for (;;)
         {
-            // ✅ MUDANÇA: Mapeamento periódico (se habilitado)
-            // Se s_periodic_interval_seconds > 0, faz polling periódico
-            // Se s_periodic_interval_seconds == 0, mapeamento é apenas por eventos
             if (s_periodic_interval_seconds > 0)
             {
-                // Aguarda o intervalo configurado
                 vTaskDelay(pdMS_TO_TICKS(s_periodic_interval_seconds * 1000));
-                
-                // Se não há mapeamento em andamento, dispara um novo
+
                 if (!s_mapping_in_progress)
                 {
                     trigger_mapping();
@@ -487,13 +449,9 @@ namespace WetzelMesh
             }
             else
             {
-                // ✅ Mapeamento apenas por eventos (NODE_JOINED/NODE_LEFT)
-                // Aguarda indefinidamente até receber evento que dispara mapeamento
-                // via trigger_mapping() chamado externamente
                 vTaskDelay(pdMS_TO_TICKS(1000));
             }
 
-            // Se mapeamento está em andamento, aguarda respostas e verifica timeout
             if (s_mapping_in_progress)
             {
                 uint64_t now_ms = esp_timer_get_time() / 1000ULL;
@@ -502,32 +460,26 @@ namespace WetzelMesh
                 if (elapsed >= s_mapping_timeout_ms)
                 {
                     ESP_LOGI(TAG, "Timeout do mapeamento (%u ms), finalizando...", s_mapping_timeout_ms);
-                    
-                    // ✅ CORREÇÃO: Marca mapeamento como concluído ANTES de processar
-                    // para evitar que respostas tardias sejam adicionadas ao próximo mapeamento
+
                     s_mapping_in_progress = false;
-                    
-                    // Constrói matriz de conectividade (isso adiciona border node automaticamente)
+
                     build_connectivity_matrix();
-                    
-                    // Converte nodes coletados para o mapa
+
                     s_last_map.nodes.clear();
                     for (const auto &pair : s_collected_nodes)
                     {
                         s_last_map.nodes.push_back(pair.second);
                     }
-                    
+
                     ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
                     ESP_LOGI(TAG, "MAPEAMENTO CONCLUÍDO");
                     ESP_LOGI(TAG, "   Nodes mapeados: %u", (unsigned)s_last_map.nodes.size());
                     ESP_LOGI(TAG, "   Conexões: %u", (unsigned)s_last_map.connectivity.connections.size());
                     ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
-                    
-                    // Envia para servidor (sempre, mesmo se 0 nodes - para o servidor saber que gateway está ativo)
+
                     send_map_to_server(s_last_map);
                 }
             }
         }
     }
 }
-

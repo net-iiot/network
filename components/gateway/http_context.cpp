@@ -2,7 +2,7 @@
 #include "esp_log.h"
 #include <algorithm>
 
-namespace WetzelMesh
+namespace NetworkMesh
 {
     static const char *TAG = "HTTP_CTX";
 
@@ -15,8 +15,7 @@ namespace WetzelMesh
     std::string HttpContextManager::create_context(const Protocol::Packet &request_pkt, const std::string &server_url)
     {
         auto ctx = std::make_shared<HttpRequestContext>();
-        
-        // Usa request_id do pacote ou gera um novo
+
         if (request_pkt.request_id.empty())
         {
             ctx->request_id = Protocol::generate_request_id();
@@ -61,7 +60,7 @@ namespace WetzelMesh
     void HttpContextManager::cleanup_old_contexts(uint64_t timeout_ms)
     {
         uint64_t now = esp_timer_get_time() / 1000ULL;
-        
+
         for (auto it = contexts_.begin(); it != contexts_.end();)
         {
             if ((now - it->second->timestamp_ms) > timeout_ms)
@@ -75,6 +74,4 @@ namespace WetzelMesh
             }
         }
     }
-
-} // namespace WetzelMesh
-
+}

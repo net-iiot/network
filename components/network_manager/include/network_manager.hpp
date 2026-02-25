@@ -2,10 +2,11 @@
 #include <string>
 #include <vector>
 #include <mutex>
+#include <functional>
 #include <stdint.h>
 #include "protocol.hpp"
 
-namespace WetzelMesh
+namespace NetworkMesh
 {
 
     struct Neighbor
@@ -15,6 +16,8 @@ namespace WetzelMesh
         uint64_t last_seen_ms;
     };
 
+    using PacketHandler = std::function<void(const Protocol::Packet &)>;
+
     class NetworkManager
     {
     public:
@@ -23,13 +26,15 @@ namespace WetzelMesh
         static std::vector<Neighbor> neighbors();
         static bool send(const Protocol::Packet &p);
         static void handle_incoming(const Protocol::Packet &packet);
+        static void route_packet(const Protocol::Packet &pkt);
         static void start_hello_task();
         static void on_hello(const Protocol::Packet &hello_packet, int rssi);
         static uint64_t now_ms();
-        
-        // Network isolation
+
+        static PacketHandler &packet_handler();
+
         static std::string get_network_id();
-        static const uint8_t* get_pmk();  // Primary Master Key (16 bytes) para ESP-NOW encryption
+        static const uint8_t *get_pmk();
         static uint8_t get_wifi_channel();
 
     private:
@@ -39,7 +44,8 @@ namespace WetzelMesh
         static std::vector<Neighbor> s_neighbors;
         static std::mutex s_neighbors_mutex;
         static std::string s_network_id;
-        static uint8_t s_pmk[16];  // PMK derivado do Network ID
+        static uint8_t s_pmk[16];
+        static PacketHandler s_packet_handler;
     };
 
 }

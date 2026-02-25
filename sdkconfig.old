@@ -433,7 +433,7 @@ CONFIG_PARTITION_TABLE_MD5=y
 # end of Partition Table
 
 #
-# Wetzel Mesh (Configurações)
+# Network IIoT - Configurações de Firmware
 #
 # CONFIG_WM_ROLE_GATEWAY is not set
 CONFIG_WM_ROLE_NODE=y
@@ -441,11 +441,11 @@ CONFIG_WM_ROLE_NODE=y
 #
 # Isolamento de Rede
 #
-CONFIG_WETZEL_NETWORK_ID="wetzel"
-CONFIG_WETZEL_WIFI_CHANNEL=1
-CONFIG_WETZEL_NEIGHBOR_TIMEOUT_MS=12000
+CONFIG_NETWORK_NETWORK_ID="mesh"
+CONFIG_NETWORK_WIFI_CHANNEL=1
+CONFIG_NETWORK_NEIGHBOR_TIMEOUT_MS=12000
 # end of Isolamento de Rede
-# end of Wetzel Mesh (Configurações)
+# end of Network IIoT - Configurações de Firmware
 
 #
 # Compiler options

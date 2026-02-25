@@ -1,4 +1,7 @@
-menu "Wetzel Mesh (Configurações)"
+menu "Network IIoT - Configurações de Firmware"
+    help
+      Configure as opções de firmware para o projeto Network IIoT.
+      Estas configurações determinam o comportamento do firmware, incluindo o papel do dispositivo (Gateway ou Node) e as credenciais de rede.
 
 choice WM_DEVICE_ROLE
     prompt "Device Role"
@@ -26,7 +29,7 @@ config WM_ROLE_NODE
       um gateway conectado via UART. Isso é detectado automaticamente.
 endchoice
 
-config WETZEL_IS_GATEWAY
+config NETWORK_IS_GATEWAY
     bool
     default y if WM_ROLE_GATEWAY
     default n if WM_ROLE_NODE
@@ -37,7 +40,7 @@ menu "Isolamento de Rede"
       com o mesmo Network ID, canal WiFi e chave de criptografia.
       IMPORTANTE: Todos os nodes da mesma rede física devem ter o mesmo Network ID e Canal.
 
-config WETZEL_NETWORK_ID
+config NETWORK_NETWORK_ID
     string "Network ID (identificador da rede)"
     default "rede-01"
     help
@@ -46,7 +49,7 @@ config WETZEL_NETWORK_ID
       deste ID, garantindo isolamento total entre redes.
       Exemplo: "rede-01", "rede-02", "rede-03"
 
-config WETZEL_WIFI_CHANNEL
+config NETWORK_WIFI_CHANNEL
     int "Canal WiFi para ESP-NOW (1-13)"
     default 1
     range 1 13
@@ -58,7 +61,7 @@ config WETZEL_WIFI_CHANNEL
       - Rede 2: canal 6
       - Rede 3: canal 11
 
-config WETZEL_NEIGHBOR_TIMEOUT_MS
+config NETWORK_NEIGHBOR_TIMEOUT_MS
     int "Timeout de Neighbors (milissegundos)"
     default 12000
     range 4000 60000
@@ -77,24 +80,24 @@ menu "Credenciais de Rede (apenas Gateway)"
       Configure as credenciais de rede para o Gateway (WiFi e servidor).
       Estas configurações são usadas apenas quando o firmware roda como Gateway.
 
-config WETZEL_GATEWAY_WIFI_SSID
+config NETWORK_GATEWAY_WIFI_SSID
     string "SSID da Rede WiFi"
-    default "COR_ELE"
+    default "ssid-wifi"
     help
       Nome da rede WiFi que o gateway irá conectar.
       Configure o nome exato da sua rede WiFi aqui.
       Exemplo: "MinhaRedeWiFi"
 
-config WETZEL_GATEWAY_WIFI_PASSWORD
+config NETWORK_GATEWAY_WIFI_PASSWORD
     string "Senha da Rede WiFi"
-    default "Cwe@1602"
+    default "senha-wifi"
     help
       Senha da rede WiFi. Deixe vazio para rede aberta.
       Configure a senha da sua rede WiFi aqui.
 
-config WETZEL_GATEWAY_SERVER_URL
+config NETWORK_GATEWAY_SERVER_URL
     string "URL do Servidor HTTP"
-    default "http://172.16.10.110:5003"
+    default "http://"
     help
       URL completa do servidor HTTP onde o microserviço está rodando.
       Exemplo: http://192.168.1.100:8080

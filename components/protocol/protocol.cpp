@@ -6,11 +6,13 @@
 #include <algorithm>
 #include "esp_timer.h"
 #include "esp_random.h"
+#include "esp_log.h"
 
-namespace WetzelMesh::Protocol
+namespace NetworkMesh::Protocol
 {
-    // Tamanho máximo de chunk (deixar espaço para headers)
     static constexpr size_t kMaxChunkSize = 1500;
+    static const char *TAG_CHUNK = "CHUNK_MGR";
+
     static const char *typeToString(PacketType type)
     {
         switch (type)
@@ -82,8 +84,7 @@ namespace WetzelMesh::Protocol
             out.status = jstatus->valuedouble;
         if (jrequest_id && cJSON_IsString(jrequest_id))
             out.request_id = jrequest_id->valuestring;
-        
-        // Campos de chunk
+
         if (jis_chunk && cJSON_IsBool(jis_chunk))
             out.is_chunk = cJSON_IsTrue(jis_chunk);
         if (jchunk_id && cJSON_IsNumber(jchunk_id))
@@ -99,7 +100,6 @@ namespace WetzelMesh::Protocol
                 out.body = jbody->valuestring;
             else
             {
-                // Se "body" vier como objeto/array, embala como string compacta
                 char *printed = cJSON_PrintUnformatted(jbody);
                 if (printed)
                 {
@@ -109,7 +109,6 @@ namespace WetzelMesh::Protocol
             }
         }
 
-        // Parse de metadados de roteamento
         if (jnext_hop && cJSON_IsString(jnext_hop))
             out.next_hop = jnext_hop->valuestring;
         if (jrouting_strategy && cJSON_IsString(jrouting_strategy))
@@ -117,7 +116,6 @@ namespace WetzelMesh::Protocol
         if (jttl && cJSON_IsNumber(jttl))
             out.ttl = jttl->valuedouble;
 
-        // Parse de trace
         if (jtrace && cJSON_IsObject(jtrace))
         {
             cJSON *jpath = cJSON_GetObjectItem(jtrace, "path");
@@ -178,7 +176,6 @@ namespace WetzelMesh::Protocol
             }
         }
 
-        // Parse de topologia
         if (jtopology && cJSON_IsObject(jtopology))
         {
             cJSON *jnode_id = cJSON_GetObjectItem(jtopology, "node_id");
@@ -226,7 +223,6 @@ namespace WetzelMesh::Protocol
                 }
             }
 
-            // Parse de connectivity matrix
             if (jconnectivity && cJSON_IsObject(jconnectivity))
             {
                 cJSON *jconnections = cJSON_GetObjectItem(jconnectivity, "connections");
@@ -265,7 +261,6 @@ namespace WetzelMesh::Protocol
                 }
             }
 
-            // Parse de node_info
             if (jnode_info && cJSON_IsObject(jnode_info))
             {
                 cJSON *jnode_id = cJSON_GetObjectItem(jnode_info, "node_id");
@@ -339,7 +334,6 @@ namespace WetzelMesh::Protocol
         if (!p.request_id.empty())
             cJSON_AddStringToObject(root, "request_id", p.request_id.c_str());
 
-        // Campos de chunk
         if (p.is_chunk)
         {
             cJSON_AddBoolToObject(root, "is_chunk", true);
@@ -348,40 +342,31 @@ namespace WetzelMesh::Protocol
             cJSON_AddNumberToObject(root, "chunk_index", p.chunk_index);
         }
 
-        // body pode ser string JSON válida — tentamos parsear; se falhar, vai como string
         cJSON *parsed = cJSON_Parse(p.body.c_str());
         if (parsed)
-        {
             cJSON_AddItemToObject(root, "body", parsed);
-        }
         else
-        {
             cJSON_AddStringToObject(root, "body", p.body.c_str());
-        }
 
-        // Serializar metadados de roteamento
         if (!p.next_hop.empty())
             cJSON_AddStringToObject(root, "next_hop", p.next_hop.c_str());
         if (!p.routing_strategy.empty())
             cJSON_AddStringToObject(root, "routing_strategy", p.routing_strategy.c_str());
-        if (p.ttl != 50) // Só adiciona se diferente do padrão (50)
+        if (p.ttl != 50)
             cJSON_AddNumberToObject(root, "ttl", p.ttl);
 
-        // Serializar trace
         if (!p.trace.path.empty() || p.trace.hop_count > 0 || p.trace.created_at_ms > 0 || !p.trace.packet_id.empty())
         {
             cJSON *trace = cJSON_CreateObject();
-            
+
             if (!p.trace.path.empty())
             {
                 cJSON *path = cJSON_CreateArray();
                 for (const auto &node : p.trace.path)
-                {
                     cJSON_AddItemToArray(path, cJSON_CreateString(node.c_str()));
-                }
                 cJSON_AddItemToObject(trace, "path", path);
             }
-            
+
             if (p.trace.hop_count > 0)
                 cJSON_AddNumberToObject(trace, "hop_count", p.trace.hop_count);
             if (p.trace.created_at_ms > 0)
@@ -408,13 +393,12 @@ namespace WetzelMesh::Protocol
                 }
                 cJSON_AddItemToObject(trace, "hop_history", hop_history);
             }
-            
+
             cJSON_AddItemToObject(root, "trace", trace);
         }
 
-        // Serializar topologia
-        if (!p.topology.node_id.empty() || !p.topology.neighbors.empty() || p.topology.has_gateway || 
-            !p.topology.node_name.empty() || !p.topology.network_id.empty() || 
+        if (!p.topology.node_id.empty() || !p.topology.neighbors.empty() || p.topology.has_gateway ||
+            !p.topology.node_name.empty() || !p.topology.network_id.empty() ||
             !p.topology.connectivity.connections.empty() || !p.topology.node_info.node_id.empty())
         {
             cJSON *topology = cJSON_CreateObject();
@@ -442,7 +426,6 @@ namespace WetzelMesh::Protocol
                 cJSON_AddItemToObject(topology, "neighbors", neighbors);
             }
 
-            // Serializar connectivity matrix
             if (!p.topology.connectivity.connections.empty())
             {
                 cJSON *connectivity = cJSON_CreateObject();
@@ -462,7 +445,6 @@ namespace WetzelMesh::Protocol
                 cJSON_AddItemToObject(topology, "connectivity", connectivity);
             }
 
-            // Serializar node_info
             if (!p.topology.node_info.node_id.empty())
             {
                 cJSON *node_info = cJSON_CreateObject();
@@ -487,9 +469,7 @@ namespace WetzelMesh::Protocol
                 {
                     cJSON *capabilities = cJSON_CreateArray();
                     for (const auto &cap : p.topology.node_info.capabilities)
-                    {
                         cJSON_AddItemToArray(capabilities, cJSON_CreateString(cap.c_str()));
-                    }
                     cJSON_AddItemToObject(node_info, "capabilities", capabilities);
                 }
 
@@ -497,9 +477,7 @@ namespace WetzelMesh::Protocol
                 {
                     cJSON *metadata = cJSON_CreateObject();
                     for (const auto &pair : p.topology.node_info.metadata)
-                    {
                         cJSON_AddStringToObject(metadata, pair.first.c_str(), pair.second.c_str());
-                    }
                     cJSON_AddItemToObject(node_info, "metadata", metadata);
                 }
 
@@ -543,10 +521,8 @@ namespace WetzelMesh::Protocol
 
     std::string generate_request_id()
     {
-        // Gera ID único baseado em timestamp + random
-        uint64_t timestamp = esp_timer_get_time() / 1000ULL; // ms
+        uint64_t timestamp = esp_timer_get_time() / 1000ULL;
         uint32_t random_val = esp_random();
-        
         std::ostringstream oss;
         oss << std::hex << timestamp << "-" << random_val;
         return oss.str();
@@ -554,12 +530,10 @@ namespace WetzelMesh::Protocol
 
     std::string generate_packet_id()
     {
-        // Gera ID único estilo UUID para rastreamento de pacotes
-        uint64_t timestamp = esp_timer_get_time() / 1000ULL; // ms
+        uint64_t timestamp = esp_timer_get_time() / 1000ULL;
         uint32_t random1 = esp_random();
         uint32_t random2 = esp_random();
         uint32_t random3 = esp_random();
-        
         std::ostringstream oss;
         oss << std::hex << std::setfill('0') << std::setw(8) << (timestamp & 0xFFFFFFFF)
             << "-" << std::setw(4) << ((timestamp >> 32) & 0xFFFF)
@@ -573,23 +547,20 @@ namespace WetzelMesh::Protocol
     std::vector<Packet> create_chunks(const Packet &original, size_t max_chunk_size)
     {
         std::vector<Packet> chunks;
-        
+
         if (max_chunk_size == 0)
             max_chunk_size = kMaxChunkSize;
 
-        // Serializa o pacote original para calcular tamanho
         std::string serialized = serialize(original);
-        
-        // Se o pacote já cabe em um chunk, retorna ele mesmo
+
         if (serialized.size() <= max_chunk_size)
         {
             chunks.push_back(original);
             return chunks;
         }
 
-        // Divide o body em chunks
         size_t body_size = original.body.size();
-        uint32_t chunk_id = esp_random(); // ID único para este conjunto de chunks
+        uint32_t chunk_id = esp_random();
         size_t num_chunks = (body_size + max_chunk_size - 1) / max_chunk_size;
 
         for (size_t i = 0; i < num_chunks; i++)
@@ -615,41 +586,100 @@ namespace WetzelMesh::Protocol
         if (chunks.empty())
             return false;
 
-        // Verifica se todos os chunks pertencem ao mesmo conjunto
         uint32_t chunk_id = chunks[0].chunk_id;
-        uint32_t chunk_total = chunks[0].chunk_total;
 
-        // Ordena por chunk_index
         std::vector<Packet> sorted_chunks = chunks;
         std::sort(sorted_chunks.begin(), sorted_chunks.end(),
-                  [](const Packet &a, const Packet &b) {
+                  [](const Packet &a, const Packet &b)
+                  {
                       return a.chunk_index < b.chunk_index;
                   });
 
-        // Verifica se temos todos os chunks
-        if (sorted_chunks.size() != chunk_total)
-        {
-            // Não temos todos os chunks, mas podemos tentar reconstruir com o que temos
-            // (faltando alguns chunks)
-        }
-
-        // Reconstrói o pacote original a partir do primeiro chunk
         out = sorted_chunks[0];
         out.is_chunk = false;
         out.chunk_id = 0;
         out.chunk_total = 0;
         out.chunk_index = 0;
 
-        // Reconstrói o body concatenando todos os chunks
         out.body.clear();
         for (const auto &chunk : sorted_chunks)
         {
             if (chunk.chunk_id != chunk_id)
-                continue; // Ignora chunks de outro conjunto
+                continue;
             out.body += chunk.body;
         }
 
         return true;
     }
 
-} // namespace WetzelMesh::Protocol
+    ChunkManager &ChunkManager::instance()
+    {
+        static ChunkManager inst;
+        return inst;
+    }
+
+    bool ChunkManager::add_chunk(const Protocol::Packet &chunk, Protocol::Packet &reconstructed)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        if (!chunk.is_chunk)
+        {
+            reconstructed = chunk;
+            return true;
+        }
+
+        uint32_t cid = chunk.chunk_id;
+        uint32_t ctotal = chunk.chunk_total;
+        uint32_t cidx = chunk.chunk_index;
+
+        auto &chunk_set = chunk_sets_[cid];
+        chunk_set.chunk_id = cid;
+        chunk_set.chunk_total = ctotal;
+        chunk_set.timestamp_ms = esp_timer_get_time() / 1000ULL;
+        chunk_set.chunks[cidx] = chunk;
+
+        ESP_LOGI(TAG_CHUNK, "Chunk %u/%u adicionado (id=%u, total=%u chunks)",
+                 cidx + 1, ctotal, cid, (unsigned)chunk_set.chunks.size());
+
+        if (chunk_set.chunks.size() >= ctotal)
+        {
+            std::vector<Protocol::Packet> chunks_vec;
+            chunks_vec.reserve(chunk_set.chunks.size());
+            for (const auto &pair : chunk_set.chunks)
+                chunks_vec.push_back(pair.second);
+
+            if (reconstruct_from_chunks(chunks_vec, reconstructed))
+            {
+                ESP_LOGI(TAG_CHUNK, "Mensagem reconstruida: %u bytes", (unsigned)reconstructed.body.size());
+                chunk_sets_.erase(cid);
+                return true;
+            }
+            else
+            {
+                ESP_LOGE(TAG_CHUNK, "Falha ao reconstruir mensagem do chunk_id=%u", cid);
+                chunk_sets_.erase(cid);
+                return false;
+            }
+        }
+
+        return false;
+    }
+
+    void ChunkManager::cleanup_old_chunks(uint64_t timeout_ms)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        uint64_t now = esp_timer_get_time() / 1000ULL;
+
+        for (auto it = chunk_sets_.begin(); it != chunk_sets_.end();)
+        {
+            if ((now - it->second.timestamp_ms) > timeout_ms)
+            {
+                ESP_LOGW(TAG_CHUNK, "Removendo chunk set expirado: id=%u", it->first);
+                it = chunk_sets_.erase(it);
+            }
+            else
+                ++it;
+        }
+    }
+
+}
