@@ -1,5 +1,4 @@
 #include "ble_transport.hpp"
-#include "router.hpp"
 #include "esp_log.h"
 #include "nvs_flash.h"
 #include "nvs.h"
@@ -17,28 +16,16 @@
 #include <vector>
 #include <set>
 
-using namespace WetzelMesh;
+using namespace NetworkMesh;
 
 static const char *TAG = "BLE";
 
-// ─────────────────────────────────────────────────────────────────────────────
-// UUIDs (little-endian, conforme ESP-IDF 128-bit UUID)
-//
-// Serviço:     574D0001-AABB-CCDD-8899-102030405060
-// RX char:     574D0002-AABB-CCDD-8899-102030405060
-// BUTTON char: 574D0004-AABB-CCDD-8899-102030405060
-// ─────────────────────────────────────────────────────────────────────────────
-// UUIDs em little-endian (ESP-IDF exige LSB primeiro)
 static const uint8_t SERVICE_UUID[16]     = {0x60,0x50,0x40,0x30,0x20,0x10,0x99,0x88,0xDD,0xCC,0xBB,0xAA,0x01,0x00,0x4D,0x57};
 static const uint8_t RX_CHAR_UUID[16]     = {0x60,0x50,0x40,0x30,0x20,0x10,0x99,0x88,0xDD,0xCC,0xBB,0xAA,0x02,0x00,0x4D,0x57};
 static const uint8_t BUTTON_CHAR_UUID[16] = {0x60,0x50,0x40,0x30,0x20,0x10,0x99,0x88,0xDD,0xCC,0xBB,0xAA,0x04,0x00,0x4D,0x57};
 
-// Nome BLE fixo (não configurável — todos os nodes usam o mesmo)
-static const char *BLE_DEVICE_NAME = "WetzelMesh";
+static const char *BLE_DEVICE_NAME = "NetworkMesh";
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Statics
-// ─────────────────────────────────────────────────────────────────────────────
 bool     BLETransport::s_isGateway         = false;
 uint16_t BLETransport::s_service_handle    = 0;
 uint16_t BLETransport::s_rx_char_handle    = 0;
@@ -47,21 +34,16 @@ uint16_t BLETransport::s_button_char_handle = 0;
 static uint16_t g_tx_handle  = 0;
 static esp_gatt_if_t g_gatts_if = ESP_GATT_IF_NONE;
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Advertising
-// ─────────────────────────────────────────────────────────────────────────────
 static esp_ble_adv_params_t s_adv_params = {};
 static bool s_adv_data_set  = false;
 static bool s_advertising   = false;
 
-// Advertising anuncia o SERVICE_UUID — botão faz scan por ele
-// include_name = false → invisível em scans genéricos, mas localizável via UUID
 static esp_ble_adv_data_t s_adv_data = {
     .set_scan_rsp        = false,
     .include_name        = false,
     .include_txpower     = false,
-    .min_interval        = 0x0020, // 20ms
-    .max_interval        = 0x0040, // 40ms
+    .min_interval        = 0x0020,
+    .max_interval        = 0x0040,
     .appearance          = 0x00,
     .manufacturer_len    = 0,
     .p_manufacturer_data = nullptr,
@@ -72,9 +54,6 @@ static esp_ble_adv_data_t s_adv_data = {
     .flag                = (ESP_BLE_ADV_FLAG_GEN_DISC | ESP_BLE_ADV_FLAG_BREDR_NOT_SPT),
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Bonding
-// ─────────────────────────────────────────────────────────────────────────────
 static std::set<std::string> s_bonded_devices;
 static const char *BONDED_NS  = "ble_bonded";
 static const char *BONDED_KEY = "devices";
@@ -125,11 +104,6 @@ static void add_bonded_device(const uint8_t *mac)
         save_bonded_devices();
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Button event handler
-// Chamado quando o botão escreve na BUTTON_CHAR_UUID.
-// Converte ButtonPacket → Protocol::Packet (EVENT/BUTTON_EVENT) → Router.
-// ─────────────────────────────────────────────────────────────────────────────
 void BLETransport::handle_button_write(const uint8_t *data, uint16_t len)
 {
     if (len < sizeof(ButtonPacket))
@@ -143,11 +117,10 @@ void BLETransport::handle_button_write(const uint8_t *data, uint16_t len)
 
     if (pkt.version != 1)
     {
-        ESP_LOGW(TAG, "BUTTON: versão desconhecida %d", pkt.version);
+        ESP_LOGW(TAG, "BUTTON: versao desconhecida %d", pkt.version);
         return;
     }
 
-    // Garante null-termination do button_id
     char btn_id[17] = {};
     memcpy(btn_id, pkt.button_id, 16);
 
@@ -156,14 +129,12 @@ void BLETransport::handle_button_write(const uint8_t *data, uint16_t len)
 
     ESP_LOGI(TAG, "BUTTON_EVENT: id=%s event=%s battery=%d%%", btn_id, event_name, pkt.battery_pct);
 
-    // Monta Protocol::Packet EVENT
     Protocol::Packet out;
     out.type   = Protocol::PacketType::EVENT;
     out.method = "BUTTON_EVENT";
     out.route.src  = std::string(btn_id);
     out.route.dst  = "server";
 
-    // Body JSON com todos os campos relevantes
     char body_buf[256];
     snprintf(body_buf, sizeof(body_buf),
              "{\"button_id\":\"%s\",\"event_type\":%d,\"event_name\":\"%s\",\"battery_pct\":%d,\"node_id\":\"%s\"}",
@@ -171,12 +142,10 @@ void BLETransport::handle_button_write(const uint8_t *data, uint16_t len)
              static_cast<int>(pkt.battery_pct), node_id().c_str());
     out.body = std::string(body_buf);
 
-    Router::handle_packet(out);
+    auto &handler = NetworkManager::packet_handler();
+    if (handler) handler(out);
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Advertising helper
-// ─────────────────────────────────────────────────────────────────────────────
 static void maybe_start_advertising()
 {
     if (!s_advertising && s_adv_data_set)
@@ -184,14 +153,11 @@ static void maybe_start_advertising()
         if (esp_ble_gap_start_advertising(&s_adv_params) == ESP_OK)
         {
             s_advertising = true;
-            ESP_LOGI(TAG, "Advertising iniciado (UUID: 574D0001-AABB-CCDD-8899-102030405060)");
+            ESP_LOGI(TAG, "Advertising iniciado");
         }
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// GAP handler
-// ─────────────────────────────────────────────────────────────────────────────
 static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param)
 {
     switch (event)
@@ -227,20 +193,16 @@ static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// GATTS handler
-// ─────────────────────────────────────────────────────────────────────────────
 static void gatts_event_handler(esp_gatts_cb_event_t event,
                                 esp_gatt_if_t gatts_if,
                                 esp_ble_gatts_cb_param_t *param)
 {
     switch (event)
     {
-    // ── Registro do app GATT → cria serviço ────────────────────────────────
     case ESP_GATTS_REG_EVT:
     {
         g_gatts_if = gatts_if;
-        ESP_LOGI(TAG, "GATT registrado (if=%d), criando serviço...", gatts_if);
+        ESP_LOGI(TAG, "GATT registrado (if=%d), criando servico...", gatts_if);
         esp_ble_gap_set_device_name(BLE_DEVICE_NAME);
 
         esp_gatt_srvc_id_t service_id = {};
@@ -252,11 +214,10 @@ static void gatts_event_handler(esp_gatts_cb_event_t event,
         break;
     }
 
-    // ── Serviço criado → adiciona characteristic RX ─────────────────────────
     case ESP_GATTS_CREATE_EVT:
     {
         BLETransport::s_service_handle = param->create.service_handle;
-        ESP_LOGI(TAG, "Serviço criado (handle=%d), adicionando RX char...", BLETransport::s_service_handle);
+        ESP_LOGI(TAG, "Servico criado (handle=%d), adicionando RX char...", BLETransport::s_service_handle);
 
         esp_bt_uuid_t rx_uuid;
         rx_uuid.len = ESP_UUID_LEN_128;
@@ -271,12 +232,10 @@ static void gatts_event_handler(esp_gatts_cb_event_t event,
         break;
     }
 
-    // ── Characteristic adicionada ────────────────────────────────────────────
     case ESP_GATTS_ADD_CHAR_EVT:
     {
         uint16_t attr_handle = param->add_char.attr_handle;
 
-        // Primeira char adicionada = RX
         if (BLETransport::s_rx_char_handle == 0)
         {
             BLETransport::s_rx_char_handle = attr_handle;
@@ -293,35 +252,30 @@ static void gatts_event_handler(esp_gatts_cb_event_t event,
                 ESP_GATT_CHAR_PROP_BIT_WRITE | ESP_GATT_CHAR_PROP_BIT_WRITE_NR,
                 nullptr, nullptr);
         }
-        // Segunda char adicionada = BUTTON
         else if (BLETransport::s_button_char_handle == 0)
         {
             BLETransport::s_button_char_handle = attr_handle;
-            ESP_LOGI(TAG, "BUTTON char adicionada (handle=%d), iniciando serviço...", attr_handle);
+            ESP_LOGI(TAG, "BUTTON char adicionada (handle=%d), iniciando servico...", attr_handle);
             esp_ble_gatts_start_service(BLETransport::s_service_handle);
         }
         break;
     }
 
-    // ── Serviço iniciado → começa advertising ───────────────────────────────
     case ESP_GATTS_START_EVT:
-        ESP_LOGI(TAG, "Serviço GATT iniciado");
+        ESP_LOGI(TAG, "Servico GATT iniciado");
         BLETransport::start_advertising();
         break;
 
-    // ── Conexão ─────────────────────────────────────────────────────────────
     case ESP_GATTS_CONNECT_EVT:
     {
         ESP_LOGI(TAG, "BLE conectado: conn_id=%d MAC=%s",
                  param->connect.conn_id,
                  mac_to_str(param->connect.remote_bda).c_str());
-        // Botões não precisam de bonding — conexão direta via UUID
         if (!BLETransport::isGateway())
             LedManager::set_node_joined(true);
         break;
     }
 
-    // ── Desconexão → reinicia advertising ───────────────────────────────────
     case ESP_GATTS_DISCONNECT_EVT:
         ESP_LOGI(TAG, "BLE desconectado: conn_id=%d", param->disconnect.conn_id);
         if (!BLETransport::isGateway())
@@ -330,42 +284,33 @@ static void gatts_event_handler(esp_gatts_cb_event_t event,
         maybe_start_advertising();
         break;
 
-    // ── Write recebido ───────────────────────────────────────────────────────
     case ESP_GATTS_WRITE_EVT:
     {
         uint16_t handle = param->write.handle;
         uint16_t len    = param->write.len;
         const uint8_t *data = param->write.value;
 
-        ESP_LOGD(TAG, "WRITE handle=%d len=%d", handle, len);
-
         if (len == 0) break;
 
         if (handle == BLETransport::s_button_char_handle)
         {
-            // Pacote de botão — binário (ButtonPacket)
             LedManager::blink(TrafficSource::MESH);
             BLETransport::handle_button_write(data, len);
         }
         else if (handle == BLETransport::s_rx_char_handle)
         {
-            // Pacote genérico — JSON Protocol (uso futuro / app)
             std::string json(reinterpret_cast<const char *>(data), len);
             Protocol::Packet packet;
             if (Protocol::parse(json, packet))
             {
-                ESP_LOGI(TAG, "BLE RX: %s → %s", packet.route.src.c_str(), packet.route.dst.c_str());
+                ESP_LOGI(TAG, "BLE RX: %s -> %s", packet.route.src.c_str(), packet.route.dst.c_str());
                 LedManager::blink(TrafficSource::MESH);
                 NetworkManager::handle_incoming(packet);
             }
             else
             {
-                ESP_LOGW(TAG, "BLE RX: JSON inválido");
+                ESP_LOGW(TAG, "BLE RX: JSON invalido");
             }
-        }
-        else
-        {
-            ESP_LOGD(TAG, "WRITE em handle desconhecido (%d)", handle);
         }
         break;
     }
@@ -375,9 +320,6 @@ static void gatts_event_handler(esp_gatts_cb_event_t event,
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// BLETransport::start_gap_gatt
-// ─────────────────────────────────────────────────────────────────────────────
 void BLETransport::start_gap_gatt()
 {
     esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
@@ -394,7 +336,6 @@ void BLETransport::start_gap_gatt()
     err = esp_bt_controller_enable(ESP_BT_MODE_BLE);
     if (err == ESP_ERR_INVALID_ARG)
     {
-        // Fallback para BTDM
         (void)esp_bt_controller_disable();
         (void)esp_bt_controller_deinit();
         bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
@@ -410,7 +351,6 @@ void BLETransport::start_gap_gatt()
     ESP_ERROR_CHECK(esp_bluedroid_init());
     ESP_ERROR_CHECK(esp_bluedroid_enable());
 
-    // Security Manager — botões usam Just Works (sem PIN)
     esp_ble_io_cap_t iocap = ESP_IO_CAP_NONE;
     esp_ble_gap_set_security_param(ESP_BLE_SM_IOCAP_MODE, &iocap, sizeof(uint8_t));
     uint8_t auth_req = ESP_LE_AUTH_REQ_SC_BOND;
@@ -429,14 +369,10 @@ void BLETransport::start_gap_gatt()
     ESP_ERROR_CHECK(esp_ble_gatts_app_register(0x55));
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// BLETransport::start_advertising
-// Chamado após o serviço GATT iniciar (ESP_GATTS_START_EVT)
-// ─────────────────────────────────────────────────────────────────────────────
 void BLETransport::start_advertising()
 {
-    s_adv_params.adv_int_min       = 0x20; // 20ms — resposta rápida ao botão
-    s_adv_params.adv_int_max       = 0x40; // 40ms
+    s_adv_params.adv_int_min       = 0x20;
+    s_adv_params.adv_int_max       = 0x40;
     s_adv_params.adv_type          = ADV_TYPE_IND;
     s_adv_params.own_addr_type     = BLE_ADDR_TYPE_PUBLIC;
     s_adv_params.channel_map       = ADV_CHNL_ALL;
@@ -446,9 +382,6 @@ void BLETransport::start_advertising()
     ESP_ERROR_CHECK(esp_ble_gap_config_adv_data(&s_adv_data));
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// BLETransport::node_id
-// ─────────────────────────────────────────────────────────────────────────────
 std::string BLETransport::node_id()
 {
     uint8_t mac[6];
@@ -458,9 +391,6 @@ std::string BLETransport::node_id()
     return std::string(buf);
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// BLETransport::init
-// ─────────────────────────────────────────────────────────────────────────────
 void BLETransport::init(bool isGateway)
 {
     s_isGateway          = isGateway;
@@ -468,18 +398,13 @@ void BLETransport::init(bool isGateway)
     s_rx_char_handle     = 0;
     s_button_char_handle = 0;
 
-    ESP_LOGI(TAG, "Inicializando BLE (Node) — SERVICE_UUID: 574D0001-AABB-CCDD-8899-102030405060");
-    // O restante do setup (create_service → add chars → start_service → advertising)
-    // ocorre de forma assíncrona nos handlers GATTS após o app_register.
+    ESP_LOGI(TAG, "Inicializando BLE (Node)");
     start_gap_gatt();
 
     if (!s_isGateway)
         LedManager::set_node_joined(false);
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// BLETransport::notify_tx / send
-// ─────────────────────────────────────────────────────────────────────────────
 void BLETransport::notify_tx(const std::string &data)
 {
     if (g_tx_handle == 0) return;
@@ -494,14 +419,14 @@ bool BLETransport::send(const Protocol::Packet &packet)
     return true;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// BLETransport::on_receive_json (uso futuro / app)
-// ─────────────────────────────────────────────────────────────────────────────
 void BLETransport::on_receive_json(const std::string &jsonString)
 {
     Protocol::Packet pkt;
     if (Protocol::parse(jsonString, pkt))
-        Router::handle_packet(pkt);
+    {
+        auto &handler = NetworkManager::packet_handler();
+        if (handler) handler(pkt);
+    }
     else
-        ESP_LOGW(TAG, "JSON BLE inválido");
+        ESP_LOGW(TAG, "JSON BLE invalido");
 }

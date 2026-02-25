@@ -6,25 +6,22 @@
 #include "esp_netif.h"
 #include "nvs_flash.h"
 #include "esp_log.h"
-#include "esp_idf_version.h" // para ESP_IDF_VERSION_VAL
+#include "esp_idf_version.h"
 
-#include "router.hpp"
 #include "led_manager.hpp"
 #include "network_manager.hpp"
 #include "border_uart.hpp"
 #include "ble_transport.hpp"
 
-namespace WetzelMesh
+namespace NetworkMesh
 {
 
     static const char *TAG = "ESPNOW";
 
-    // endereço broadcast (6 bytes)
     static const uint8_t kBroadcast[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
-    
+
     uint8_t ESPNOWTransport::s_channel = 1;
 
-    // Assinaturas compatíveis com IDF 5.5.1
     static void espnow_send_thunk(const wifi_tx_info_t *info, esp_now_send_status_t status);
     static void espnow_recv_thunk(const esp_now_recv_info_t *info, const uint8_t *data, int len);
 
@@ -35,7 +32,6 @@ namespace WetzelMesh
 
     bool ESPNOWTransport::ensure_wifi_started()
     {
-        // Base do TCP/IP + loop de eventos (idempotentes)
         (void)esp_event_loop_create_default();
         (void)esp_netif_init();
         (void)esp_netif_create_default_wifi_sta();
@@ -50,13 +46,11 @@ namespace WetzelMesh
 
         ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
         ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-        ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE)); // sem power-save para menor latência
+        ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
 
         err = esp_wifi_start();
         if (err != ESP_OK && err != ESP_ERR_WIFI_NOT_INIT && err != ESP_ERR_WIFI_CONN)
-        {
             ESP_LOGW(TAG, "esp_wifi_start: %s", esp_err_to_name(err));
-        }
 
         ESP_LOGI(TAG, "Wi-Fi STA iniciado.");
         return true;
@@ -69,9 +63,8 @@ namespace WetzelMesh
 
     bool ESPNOWTransport::ensure_channel_fixed()
     {
-        // Usa canal do NetworkManager (baseado no Network ID)
         s_channel = NetworkManager::get_wifi_channel();
-        
+
         esp_err_t err = esp_wifi_set_channel(s_channel, WIFI_SECOND_CHAN_NONE);
         if (err != ESP_OK)
         {
@@ -82,24 +75,22 @@ namespace WetzelMesh
         uint8_t ch = 0;
         wifi_second_chan_t sc = WIFI_SECOND_CHAN_NONE;
         esp_wifi_get_channel(&ch, &sc);
-        ESP_LOGI(TAG, "Canal ESPNOW fixado em %u (Network ID: %s).", 
+        ESP_LOGI(TAG, "Canal ESPNOW fixado em %u (Network ID: %s).",
                  (unsigned)ch, NetworkManager::get_network_id().c_str());
         return true;
     }
 
     bool ESPNOWTransport::ensure_broadcast_peer()
     {
-        // ESP-NOW não suporta criptografia para endereços multicast (broadcast)
-        // Portanto, sempre desabilitamos criptografia para o peer broadcast
         bool encryption_enabled = false;
-        
+
 #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(4, 4, 0)
         if (esp_now_is_peer_exist(kBroadcast))
         {
             esp_now_peer_info_t peer{};
             memcpy(peer.peer_addr, kBroadcast, 6);
             peer.ifidx = WIFI_IF_STA;
-            peer.channel = s_channel;  // Usa canal dinâmico
+            peer.channel = s_channel;
             peer.encrypt = encryption_enabled;
             (void)esp_now_mod_peer(&peer);
             return true;
@@ -109,13 +100,13 @@ namespace WetzelMesh
         esp_now_peer_info_t peer{};
         memcpy(peer.peer_addr, kBroadcast, 6);
         peer.ifidx = WIFI_IF_STA;
-        peer.channel = s_channel;  // Usa canal dinâmico
+        peer.channel = s_channel;
         peer.encrypt = encryption_enabled;
 
         esp_err_t err = esp_now_add_peer(&peer);
         if (err == ESP_OK || err == ESP_ERR_ESPNOW_EXIST)
         {
-            ESP_LOGI(TAG, "Peer broadcast ativo (canal %u, encryption: NÃO, Network: %s)", 
+            ESP_LOGI(TAG, "Peer broadcast ativo (canal %u, Network: %s)",
                      s_channel, NetworkManager::get_network_id().c_str());
             return true;
         }
@@ -125,7 +116,7 @@ namespace WetzelMesh
 
     void ESPNOWTransport::init()
     {
-#ifdef CONFIG_WETZEL_IS_GATEWAY
+#ifdef CONFIG_NETWORK_IS_GATEWAY
         ESP_LOGW(TAG, "Init ignorado: este firmware esta em modo Gateway.");
         return;
 #endif
@@ -148,34 +139,27 @@ namespace WetzelMesh
             return;
         }
 
-        // Configura PMK (Primary Master Key) para criptografia ESP-NOW
-        const uint8_t* pmk = NetworkManager::get_pmk();
+        const uint8_t *pmk = NetworkManager::get_pmk();
         err = esp_now_set_pmk(pmk);
         if (err != ESP_OK)
-        {
             ESP_LOGE(TAG, "esp_now_set_pmk falhou: %s", esp_err_to_name(err));
-            // Continua mesmo assim (modo não-criptografado como fallback)
-        }
         else
-        {
             ESP_LOGI(TAG, "ESP-NOW encryption habilitado com PMK derivado do Network ID");
-        }
 
-        // Callbacks (assinaturas IDF 5.5.1)
         ESP_ERROR_CHECK(esp_now_register_recv_cb(espnow_recv_thunk));
         ESP_ERROR_CHECK(esp_now_register_send_cb(espnow_send_thunk));
 
         ensure_broadcast_peer();
 
-        ESP_LOGI(TAG, "ESPNOW iniciado (canal %u, encryption: %s, Network: %s)", 
-                 s_channel, 
-                 (err == ESP_OK) ? "SIM" : "NÃO",
+        ESP_LOGI(TAG, "ESPNOW iniciado (canal %u, encryption: %s, Network: %s)",
+                 s_channel,
+                 (err == ESP_OK) ? "SIM" : "NAO",
                  NetworkManager::get_network_id().c_str());
     }
 
     bool ESPNOWTransport::send(const Protocol::Packet &p)
     {
-#ifdef CONFIG_WETZEL_IS_GATEWAY
+#ifdef CONFIG_NETWORK_IS_GATEWAY
         ESP_LOGW(TAG, "send() ignorado: Gateway nao usa ESPNOW.");
         return false;
 #endif
@@ -214,19 +198,14 @@ namespace WetzelMesh
             return false;
         }
 
-        // Só pisca LED para dados reais, não para mensagens HELLO (controle de topologia)
         if (!(p.type == Protocol::PacketType::EVENT && p.method == "HELLO"))
-        {
             LedManager::blink(TrafficSource::MESH);
-        }
+
         return true;
     }
 
-    // ---------- Callbacks low-level ----------
-
     static void espnow_send_thunk(const wifi_tx_info_t *info, esp_now_send_status_t st)
     {
-        // Em IDF 5.5.1 o campo é 'des_addr'; em versões mais antigas era 'peer_addr'.
 #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 4, 0)
         const uint8_t *mac = (info ? info->des_addr : nullptr);
 #else
@@ -252,12 +231,10 @@ namespace WetzelMesh
             rssi = info->rx_ctrl.rssi;
 #endif
 
-        // Repasse para alto nível
-        WetzelMesh::ESPNOWTransport::on_recv_cb(mac, data, len, rssi);
+        NetworkMesh::ESPNOWTransport::on_recv_cb(mac, data, len, rssi);
     }
 
-    // on_recv_cb definido no seu .hpp antigo, mantido:
-    void ESPNOWTransport::on_recv_cb(const uint8_t * /*mac*/, const uint8_t *data, int len, int rssi)
+    void ESPNOWTransport::on_recv_cb(const uint8_t *, const uint8_t *data, int len, int rssi)
     {
         if (len <= 0)
             return;
@@ -271,75 +248,50 @@ namespace WetzelMesh
 
             if (pkt.type == Protocol::PacketType::EVENT && pkt.method == "HELLO")
             {
-                // Filtro adicional por Network ID (redundante, mas útil para logs)
                 std::string received_network_id = pkt.topology.network_id;
                 std::string my_network_id = NetworkManager::get_network_id();
-                
+
                 if (!received_network_id.empty() && received_network_id != my_network_id)
                 {
                     ESP_LOGW(TAG, "RX[MESH] HELLO ignorado: Network ID diferente (recebido: %s, esperado: %s)",
                              received_network_id.c_str(), my_network_id.c_str());
-                    return;  // Ignora pacote de outra rede
+                    return;
                 }
-                
-                NetworkManager::on_hello(pkt, rssi);  // Passa pacote completo
-                // Não pisca LED para mensagens HELLO (são apenas controle de topologia)
+
+                NetworkManager::on_hello(pkt, rssi);
             }
             else
             {
-                // Atualizar informações de rastreabilidade com RSSI recebido
-                // (O router vai atualizar o path e hop_count, mas aqui já temos o RSSI)
                 if (!pkt.trace.hop_history.empty())
-                {
-                    // Atualizar RSSI do último hop (que foi o que enviou)
                     pkt.trace.hop_history.back().rssi = rssi;
-                }
-                
-                // IMPORTANTE: DISCOVERY precisa ser processado pelo NetworkManager ANTES de reencaminhar
-                // para que o node responda corretamente
+
                 if (pkt.type == Protocol::PacketType::REQUEST && pkt.method == "DISCOVERY")
                 {
                     ESP_LOGI(TAG, "RX[MESH] DISCOVERY recebido - processando localmente primeiro...");
-                    LedManager::blink(TrafficSource::MESH); // Pisca ao receber
-                    NetworkManager::handle_incoming(pkt); // Processa localmente (node responde)
-                    // Depois reencaminha via Router (flooding)
-                    Router::handle_packet(pkt);
+                    LedManager::blink(TrafficSource::MESH);
+                    NetworkManager::handle_incoming(pkt);
+                    NetworkManager::route_packet(pkt);
                     return;
                 }
-                
-                // IMPORTANTE: Border node deve interceptar DISCOVERY_RESPONSE antes do Router
-                // para reencaminhar via UART ao invés de via mesh
-                if (pkt.type == Protocol::PacketType::RESPONSE && 
-                    pkt.method == "DISCOVERY_RESPONSE" && 
+
+                if (pkt.type == Protocol::PacketType::RESPONSE &&
+                    pkt.method == "DISCOVERY_RESPONSE" &&
                     pkt.route.dst == "gateway" &&
                     BorderUart::is_enabled())
                 {
                     std::string my_id = BLETransport::node_id();
-                    ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
-                    ESP_LOGI(TAG, "BORDER NODE: Verificando DISCOVERY_RESPONSE");
-                    ESP_LOGI(TAG, "   Origem: %s", pkt.route.src.c_str());
-                    ESP_LOGI(TAG, "   Meu ID: %s", my_id.c_str());
-                    ESP_LOGI(TAG, "   Node Type: %s", pkt.topology.node_info.node_type.c_str());
-                    // Se não é do próprio border node, reencaminha via UART
                     if (pkt.route.src != my_id && pkt.route.src != "border")
                     {
-                        ESP_LOGI(TAG, "✅ INTERCEPTADO: DISCOVERY_RESPONSE de %s (via MESH) -> UART -> Gateway", pkt.route.src.c_str());
-                        LedManager::blink(TrafficSource::MESH); // Pisca ao receber
-                        // ✅ CORREÇÃO: Envia DIRETO para UART, sem passar pelo NetworkManager
+                        ESP_LOGI(TAG, "BORDER: DISCOVERY_RESPONSE de %s -> UART -> Gateway", pkt.route.src.c_str());
+                        LedManager::blink(TrafficSource::MESH);
                         BorderUart::send_to_gateway(pkt);
-                        ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
                         return;
                     }
-                    else
-                    {
-                        ESP_LOGI(TAG, "⚠️ IGNORADO: DISCOVERY_RESPONSE é do próprio border node");
-                        ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
-                    }
                 }
-                
-                // Pisca LED ao receber dados pela mesh (exceto HELLO que já foi tratado acima)
+
                 LedManager::blink(TrafficSource::MESH);
-                Router::handle_packet(pkt);
+                auto &handler = NetworkManager::packet_handler();
+                if (handler) handler(pkt);
             }
         }
         else
@@ -348,4 +300,4 @@ namespace WetzelMesh
         }
     }
 
-} // namespace WetzelMesh
+}

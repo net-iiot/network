@@ -1,6 +1,6 @@
-# 🧩 WetzelMesh — IoT Mesh Network Framework
+# 🧩 NetworkMesh — IoT Mesh Network Framework
 
-**WetzelMesh** é uma arquitetura modular desenvolvida em **C++ sobre ESP-IDF**, projetada para criar uma **rede mesh híbrida BLE + ESP-NOW + UART** capaz de transmitir dados entre dispositivos IoT (nós) e um gateway central conectado a um servidor.  
+**NetworkMesh** é uma arquitetura modular desenvolvida em **C++ sobre ESP-IDF**, projetada para criar uma **rede mesh híbrida BLE + ESP-NOW + UART** capaz de transmitir dados entre dispositivos IoT (nós) e um gateway central conectado a um servidor.  
 
 A rede é totalmente **extensível**, permitindo que dispositivos ESP32, sensores e até aplicativos Flutter participem da malha, trocando pacotes JSON padronizados com roteamento dinâmico, comunicação bidirecional e **rastreabilidade completa** para visualização e mapeamento da rede.
 
@@ -8,7 +8,7 @@ A rede é totalmente **extensível**, permitindo que dispositivos ESP32, sensore
 
 ## 🚀 Visão Geral da Arquitetura
 
-A rede WetzelMesh é composta por três camadas principais:
+A rede NetworkMesh é composta por três camadas principais:
 
 ```
 [ Servidor Backend / Microserviço ]
@@ -55,7 +55,7 @@ Node1  Node2    Node3   Flutter Plugin
 
 ### 2️⃣ Dependências adicionais (instaladas automaticamente)
 
-WetzelMesh utiliza alguns componentes integrados ao ESP-IDF:
+NetworkMesh utiliza alguns componentes integrados ao ESP-IDF:
 
 - **Bluetooth (BLE)** — via `esp_bt` e `esp_ble_mesh`  
 - **ESP-NOW** — comunicação mesh sem fio de baixo consumo
@@ -79,7 +79,7 @@ WetzelMesh utiliza alguns componentes integrados ao ESP-IDF:
 ## 🧱 Estrutura do Projeto
 
 ```
-wetzel-mesh/
+network-mesh/
 ├── CMakeLists.txt
 ├── main/
 │   ├── main.cpp
@@ -153,7 +153,7 @@ wetzel-mesh/
 
 ## 🧠 Estrutura do Protocolo
 
-Cada mensagem WetzelMesh segue um **JSON padronizado e extensível**, garantindo compatibilidade entre todos os dispositivos (ESP, sensor, app Flutter e servidor) e fornecendo **rastreabilidade completa** para mapeamento e visualização da rede.
+Cada mensagem NetworkMesh segue um **JSON padronizado e extensível**, garantindo compatibilidade entre todos os dispositivos (ESP, sensor, app Flutter e servidor) e fornecendo **rastreabilidade completa** para mapeamento e visualização da rede.
 
 ### 📦 Estrutura Base do Pacote
 
@@ -515,8 +515,8 @@ idf.py --version
 
 ```bash
 # Clonar repositório
-git clone https://github.com/seuprojeto/wetzel-mesh.git
-cd wetzel-mesh
+git clone https://github.com/seuprojeto/network-mesh.git
+cd network-mesh
 
 # Configurar target (ESP32, ESP32-S2, etc.)
 idf.py set-target esp32
@@ -530,7 +530,7 @@ idf.py menuconfig
 No `menuconfig`, configure:
 
 ```
-Wetzel Mesh
+Network Mesh
   ├─ Este build é GATEWAY? (y/n)
   ├─ Gateway
   │  ├─ WiFi SSID
@@ -720,4 +720,4 @@ Você é livre para usar, modificar e redistribuir, desde que mantenha os crédi
 **Bruno Santos**  
 Desenvolvedor Full-Stack & IoT Engineer  
 📧 <bruno.santos@empresa.com>  
-📍 Wetzel Automação Industrial — 2025
+📍 Network Automação Industrial — 2025

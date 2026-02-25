@@ -9,14 +9,20 @@
 #include "nvs_flash.h"
 #include "nvs.h"
 #include "protocol.hpp"
+#include "cJSON.h"
 #include <cstring>
 #include <sstream>
 #include <string>
 #include <vector>
 
-namespace WetzelMesh
+namespace NetworkMesh
 {
     static const char *TAG = "OTA";
+    static const char *NVS_NAMESPACE = "ota_state";
+    static const char *NVS_KEY_BOOT_COUNT = "boot_cnt";
+    static const char *NVS_KEY_COMMAND_ID = "cmd_id";
+    static const char *NVS_KEY_PREV_VERSION = "prev_ver";
+    static const int MAX_BOOT_RETRIES = 3;
 
     bool OTAManager::s_isGateway = false;
     std::string OTAManager::s_server_url = "";
@@ -28,6 +34,118 @@ namespace WetzelMesh
     OTAManager::ReportCallback OTAManager::s_report_callback = nullptr;
     std::string OTAManager::s_current_command_id = "";
 
+    // ─── NVS helpers ────────────────────────────────────────────────
+
+    static bool nvs_read_string(nvs_handle_t h, const char *key, std::string &out)
+    {
+        size_t len = 0;
+        if (nvs_get_str(h, key, nullptr, &len) != ESP_OK || len == 0)
+            return false;
+        char *buf = (char *)malloc(len);
+        if (!buf)
+            return false;
+        esp_err_t err = nvs_get_str(h, key, buf, &len);
+        if (err == ESP_OK)
+            out.assign(buf, len - 1);
+        free(buf);
+        return err == ESP_OK;
+    }
+
+    // ─── Rollback & NVS state ───────────────────────────────────────
+
+    void OTAManager::save_ota_state(const std::string &command_id, const std::string &version)
+    {
+        nvs_handle_t h;
+        if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h) != ESP_OK)
+            return;
+        nvs_set_str(h, NVS_KEY_COMMAND_ID, command_id.c_str());
+        nvs_set_str(h, NVS_KEY_PREV_VERSION, version.c_str());
+        nvs_set_u8(h, NVS_KEY_BOOT_COUNT, 0);
+        nvs_commit(h);
+        nvs_close(h);
+        ESP_LOGI(TAG, "Estado OTA salvo no NVS (cmd=%s, ver=%s)", command_id.c_str(), version.c_str());
+    }
+
+    void OTAManager::clear_ota_state()
+    {
+        nvs_handle_t h;
+        if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h) != ESP_OK)
+            return;
+        nvs_erase_key(h, NVS_KEY_COMMAND_ID);
+        nvs_erase_key(h, NVS_KEY_PREV_VERSION);
+        nvs_set_u8(h, NVS_KEY_BOOT_COUNT, 0);
+        nvs_commit(h);
+        nvs_close(h);
+    }
+
+    void OTAManager::check_pending_ota_result()
+    {
+        nvs_handle_t h;
+        if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &h) != ESP_OK)
+            return;
+
+        std::string saved_cmd_id, prev_version;
+        bool has_state = nvs_read_string(h, NVS_KEY_COMMAND_ID, saved_cmd_id);
+        nvs_read_string(h, NVS_KEY_PREV_VERSION, prev_version);
+        nvs_close(h);
+
+        if (!has_state || saved_cmd_id.empty())
+            return;
+
+        bool version_changed = (!prev_version.empty() && prev_version != s_current_version.version);
+
+        ESP_LOGI(TAG, "Estado OTA pendente encontrado: cmd=%s, prev_ver=%s, cur_ver=%s",
+                 saved_cmd_id.c_str(), prev_version.c_str(), s_current_version.version.c_str());
+
+        if (version_changed)
+        {
+            ESP_LOGI(TAG, "OTA bem sucedido! Versão mudou de %s para %s", prev_version.c_str(), s_current_version.version.c_str());
+            if (s_report_callback)
+            {
+                std::string node_id = s_isGateway ? "gateway" : "";
+                s_report_callback(true, saved_cmd_id, node_id, "");
+            }
+        }
+        else
+        {
+            ESP_LOGW(TAG, "OTA pode ter falhado — versão não mudou (rollback?)");
+            if (s_report_callback)
+            {
+                std::string node_id = s_isGateway ? "gateway" : "";
+                s_report_callback(false, saved_cmd_id, node_id, "Versão não mudou após reboot (possível rollback)");
+            }
+        }
+
+        clear_ota_state();
+    }
+
+    void OTAManager::rollback_watchdog_task(void *param)
+    {
+        vTaskDelay(pdMS_TO_TICKS(10000));
+
+        esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
+        if (err == ESP_OK)
+        {
+            ESP_LOGI(TAG, "Firmware confirmado como válido após 10s de uptime estável");
+
+            nvs_handle_t h;
+            if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h) == ESP_OK)
+            {
+                nvs_set_u8(h, NVS_KEY_BOOT_COUNT, 0);
+                nvs_commit(h);
+                nvs_close(h);
+            }
+        }
+        else
+        {
+            ESP_LOGW(TAG, "esp_ota_mark_app_valid falhou: %s (pode não ser partição OTA)", esp_err_to_name(err));
+        }
+
+        vTaskDelete(nullptr);
+    }
+
+    // ─── Callbacks ──────────────────────────────────────────────────
+
     void OTAManager::set_send_to_border_callback(SendToBorderCallback cb)
     {
         s_send_to_border_callback = cb;
@@ -37,6 +155,8 @@ namespace WetzelMesh
     {
         s_report_callback = cb;
     }
+
+    // ─── Version info ───────────────────────────────────────────────
 
     std::string OTAManager::get_version_string()
     {
@@ -51,29 +171,48 @@ namespace WetzelMesh
         const esp_app_desc_t *app_desc = esp_app_get_description();
         s_current_version.version = app_desc->version;
         s_current_version.build_date = app_desc->date;
-        
-        // idf_ver é uma string, não uma estrutura
-        // Usa um hash simples da string como build_number
+
         std::string idf_ver_str = app_desc->idf_ver;
         uint32_t hash = 0;
-        for (char c : idf_ver_str) {
+        for (char c : idf_ver_str)
             hash = hash * 31 + c;
-        }
         s_current_version.build_number = hash;
-        
-        // Calcula hash simples do firmware
+
         std::ostringstream oss;
         oss << app_desc->version << app_desc->date << app_desc->time;
         s_current_version.hash = oss.str();
-        
+
         return s_current_version;
     }
 
-    // Wrapper C para a task (xTaskCreate precisa de função C, não método C++)
-    static void ota_task_wrapper(void *param)
+    FirmwareVersion OTAManager::parse_version_info(const std::string &json)
     {
-        OTAManager::ota_task(param);
+        FirmwareVersion version;
+        cJSON *root = cJSON_Parse(json.c_str());
+        if (!root)
+            return version;
+
+        cJSON *jver = cJSON_GetObjectItem(root, "version");
+        if (jver && cJSON_IsString(jver))
+            version.version = jver->valuestring;
+
+        cJSON *jdate = cJSON_GetObjectItem(root, "build_date");
+        if (jdate && cJSON_IsString(jdate))
+            version.build_date = jdate->valuestring;
+
+        cJSON *jbuild = cJSON_GetObjectItem(root, "build_number");
+        if (jbuild && cJSON_IsNumber(jbuild))
+            version.build_number = (uint32_t)jbuild->valuedouble;
+
+        cJSON *jhash = cJSON_GetObjectItem(root, "hash");
+        if (jhash && cJSON_IsString(jhash))
+            version.hash = jhash->valuestring;
+
+        cJSON_Delete(root);
+        return version;
     }
+
+    // ─── Init ───────────────────────────────────────────────────────
 
     void OTAManager::init(bool isGateway, const std::string &server_url)
     {
@@ -81,22 +220,69 @@ namespace WetzelMesh
         s_server_url = server_url;
         s_status = OTAStatus::IDLE;
         s_download_progress = 0;
-        
+
         get_current_version();
-        
+
         ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
         ESP_LOGI(TAG, "OTA Manager inicializado");
         ESP_LOGI(TAG, "Versão atual: %s", s_current_version.version.c_str());
         ESP_LOGI(TAG, "Build date: %s", s_current_version.build_date.c_str());
         ESP_LOGI(TAG, "Modo: %s", isGateway ? "Gateway" : "Node");
         ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
-        
-        if (isGateway)
+
+        // ── Rollback: boot counter ──
+        nvs_handle_t h;
+        if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h) == ESP_OK)
         {
-            // Gateway: cria task para verificar atualizações periodicamente
-            xTaskCreatePinnedToCore(ota_task_wrapper, "ota_task", 8192, nullptr, 5, nullptr, tskNO_AFFINITY);
+            uint8_t boot_count = 0;
+            nvs_get_u8(h, NVS_KEY_BOOT_COUNT, &boot_count);
+            boot_count++;
+            nvs_set_u8(h, NVS_KEY_BOOT_COUNT, boot_count);
+            nvs_commit(h);
+            nvs_close(h);
+
+            ESP_LOGI(TAG, "Boot count: %d/%d", boot_count, MAX_BOOT_RETRIES);
+
+            if (boot_count >= MAX_BOOT_RETRIES)
+            {
+                ESP_LOGE(TAG, "Boot count atingiu limite (%d)! Tentando rollback...", MAX_BOOT_RETRIES);
+                if (esp_ota_check_rollback_is_possible())
+                {
+                    esp_ota_mark_app_invalid_rollback_and_reboot();
+                    // Não retorna — reboot imediato
+                }
+                else
+                {
+                    ESP_LOGW(TAG, "Rollback não disponível, continuando com firmware atual");
+                    // Zera contador para não ficar preso
+                    if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h) == ESP_OK)
+                    {
+                        nvs_set_u8(h, NVS_KEY_BOOT_COUNT, 0);
+                        nvs_commit(h);
+                        nvs_close(h);
+                    }
+                }
+            }
         }
+
+        // ── Rollback watchdog: confirma firmware após 10s estável ──
+        xTaskCreatePinnedToCore(rollback_watchdog_task, "ota_rollback", 2048, nullptr, 3, nullptr, tskNO_AFFINITY);
+
+        // ── Verificar resultado de OTA pendente (após reboot) ──
+        // Nota: check_pending_ota_result depende de s_report_callback.
+        // No node, o callback é setado depois em network_manager::init().
+        // Então adiamos essa verificação com uma task curta.
+        xTaskCreatePinnedToCore(
+            [](void *)
+            {
+                vTaskDelay(pdMS_TO_TICKS(5000));
+                check_pending_ota_result();
+                vTaskDelete(nullptr);
+            },
+            "ota_pending", 3072, nullptr, 3, nullptr, tskNO_AFFINITY);
     }
+
+    // ─── Status ─────────────────────────────────────────────────────
 
     void OTAManager::set_status_callback(StatusCallback cb)
     {
@@ -113,14 +299,7 @@ namespace WetzelMesh
         return s_download_progress;
     }
 
-    FirmwareVersion OTAManager::parse_version_info(const std::string &json)
-    {
-        FirmwareVersion version;
-        // Parse simples do JSON (pode ser melhorado)
-        // Formato esperado: {"version":"1.0.1","build_date":"2025-01-15","build_number":1001,"hash":"abc123"}
-        // Por enquanto, retorna versão vazia
-        return version;
-    }
+    // ─── Check for update ───────────────────────────────────────────
 
     void OTAManager::check_for_update()
     {
@@ -138,52 +317,80 @@ namespace WetzelMesh
 
         ESP_LOGI(TAG, "Verificando atualizações disponíveis...");
         s_status = OTAStatus::CHECKING;
-        
+
         if (s_status_callback)
             s_status_callback(s_status, "Verificando atualizações...");
 
-        // Cria requisição HTTP GET para verificar versão
         std::string version_url = s_server_url + "/api/firmware/version";
-        
+
+        std::string response_body;
+
+        auto http_event = [](esp_http_client_event_t *evt) -> esp_err_t
+        {
+            if (evt->event_id == HTTP_EVENT_ON_DATA && evt->user_data)
+            {
+                std::string *body = static_cast<std::string *>(evt->user_data);
+                body->append((char *)evt->data, evt->data_len);
+            }
+            return ESP_OK;
+        };
+
         esp_http_client_config_t config = {};
         config.url = version_url.c_str();
         config.timeout_ms = 5000;
-        
+        config.event_handler = http_event;
+        config.user_data = &response_body;
+
         esp_http_client_handle_t client = esp_http_client_init(&config);
         if (!client)
         {
             ESP_LOGE(TAG, "Falha ao criar cliente HTTP");
-            s_status = OTAStatus::FAILED;
-            if (s_status_callback)
-                s_status_callback(s_status, "Falha ao criar cliente HTTP");
+            s_status = OTAStatus::IDLE;
             return;
         }
 
-        // Define método GET explicitamente
         esp_http_client_set_method(client, HTTP_METHOD_GET);
-        
+
         ESP_LOGI(TAG, "Fazendo GET para: %s", version_url.c_str());
         esp_err_t err = esp_http_client_perform(client);
         if (err == ESP_OK)
         {
             int status_code = esp_http_client_get_status_code(client);
-            int content_length = esp_http_client_get_content_length(client);
-            
-            if (status_code == 200 && content_length > 0)
+
+            if (status_code == 200 && !response_body.empty())
             {
-                char *buffer = (char *)malloc(content_length + 1);
-                if (buffer)
+                ESP_LOGI(TAG, "Resposta do servidor: %s", response_body.c_str());
+
+                FirmwareVersion available = parse_version_info(response_body);
+
+                if (available.version.empty())
                 {
-                    int data_read = esp_http_client_read(client, buffer, content_length);
-                    if (data_read > 0)
+                    ESP_LOGW(TAG, "Resposta do servidor sem campo 'version'");
+                }
+                else if (available.version == s_current_version.version)
+                {
+                    ESP_LOGI(TAG, "Firmware já está na versão mais recente: %s", available.version.c_str());
+                }
+                else
+                {
+                    ESP_LOGI(TAG, "Nova versão disponível: %s (atual: %s)", available.version.c_str(), s_current_version.version.c_str());
+
+                    cJSON *root = cJSON_Parse(response_body.c_str());
+                    if (root)
                     {
-                        buffer[data_read] = '\0';
-                        ESP_LOGI(TAG, "Resposta do servidor: %s", buffer);
-                        
-                        // Parse da resposta e comparação de versão
-                        // Por enquanto, apenas loga
+                        cJSON *jurl = cJSON_GetObjectItem(root, "url");
+                        if (jurl && cJSON_IsString(jurl))
+                        {
+                            std::string firmware_url = jurl->valuestring;
+                            cJSON_Delete(root);
+                            esp_http_client_cleanup(client);
+                            s_status = OTAStatus::IDLE;
+                            start_update(firmware_url);
+                            return;
+                        }
+                        cJSON_Delete(root);
                     }
-                    free(buffer);
+                    ESP_LOGW(TAG, "Nova versão disponível mas sem 'url' na resposta");
                 }
             }
             else
@@ -194,8 +401,7 @@ namespace WetzelMesh
         else
         {
             ESP_LOGE(TAG, "Erro ao verificar atualizações: %s", esp_err_to_name(err));
-            
-            // Melhorar tratamento: verificar tipo de erro
+
             if (err == ESP_ERR_HTTP_CONNECT)
             {
                 ESP_LOGW(TAG, "Servidor não acessível. Verifique:");
@@ -203,17 +409,16 @@ namespace WetzelMesh
                 ESP_LOGW(TAG, "  2. URL está correta? (%s)", version_url.c_str());
                 ESP_LOGW(TAG, "  3. WiFi está conectado?");
             }
-            
-            // Não marca como FAILED imediatamente - pode ser temporário
-            // Mantém IDLE para tentar novamente na próxima verificação
         }
 
         esp_http_client_cleanup(client);
-        s_status = OTAStatus::IDLE;  // Mantém IDLE para retry automático
-        
+        s_status = OTAStatus::IDLE;
+
         if (s_status_callback)
             s_status_callback(s_status, "Verificação concluída");
     }
+
+    // ─── Start update ───────────────────────────────────────────────
 
     void OTAManager::start_update(const std::string &firmware_url)
     {
@@ -230,7 +435,10 @@ namespace WetzelMesh
 
         s_status = OTAStatus::DOWNLOADING;
         s_download_progress = 0;
-        
+
+        // Salvar estado no NVS antes de iniciar (para reportar resultado após reboot)
+        save_ota_state(s_current_command_id, s_current_version.version);
+
         if (s_status_callback)
             s_status_callback(s_status, "Iniciando download...");
 
@@ -252,12 +460,10 @@ namespace WetzelMesh
                 if (s_status_callback)
                     s_status_callback(s_status, "Atualização concluída com sucesso");
 
-                // Envia feedback de sucesso antes de reiniciar
                 if (s_report_callback && !s_current_command_id.empty())
                 {
                     std::string node_id = s_isGateway ? "gateway" : "";
                     s_report_callback(true, s_current_command_id, node_id, "");
-                    // Aguarda envio do pacote antes de reiniciar
                     vTaskDelay(pdMS_TO_TICKS(2000));
                 }
 
@@ -275,6 +481,7 @@ namespace WetzelMesh
                     std::string node_id = s_isGateway ? "gateway" : "";
                     s_report_callback(false, s_current_command_id, node_id, "Falha ao instalar firmware");
                 }
+                clear_ota_state();
             }
         }
         else
@@ -288,47 +495,64 @@ namespace WetzelMesh
                 std::string node_id = s_isGateway ? "gateway" : "";
                 s_report_callback(false, s_current_command_id, node_id, "Falha ao baixar firmware");
             }
+            clear_ota_state();
         }
+
+        s_current_command_id.clear();
+        s_status = OTAStatus::IDLE;
     }
+
+    // ─── Download & Install ─────────────────────────────────────────
 
     bool OTAManager::download_firmware(const std::string &url)
     {
-        // Configuração HTTP para OTA
         esp_http_client_config_t http_config = {};
         http_config.url = url.c_str();
         http_config.timeout_ms = 30000;
         http_config.buffer_size = 1024;
-        http_config.skip_cert_common_name_check = true;  // Pula verificação de certificado
-        
-        // Configuração OTA
+        http_config.skip_cert_common_name_check = true;
+
         esp_https_ota_config_t ota_config = {};
         ota_config.http_config = &http_config;
-        
+
         esp_https_ota_handle_t https_ota_handle = nullptr;
         esp_err_t err = esp_https_ota_begin(&ota_config, &https_ota_handle);
-        
+
         if (err != ESP_OK)
         {
             ESP_LOGE(TAG, "esp_https_ota_begin falhou: %s", esp_err_to_name(err));
             return false;
         }
 
-        ESP_LOGI(TAG, "Download iniciado de: %s", url.c_str());
-        
+        int image_size = esp_https_ota_get_image_size(https_ota_handle);
+        ESP_LOGI(TAG, "Download iniciado de: %s (tamanho: %d bytes)", url.c_str(), image_size);
+
         while (1)
         {
             err = esp_https_ota_perform(https_ota_handle);
             if (err != ESP_ERR_HTTPS_OTA_IN_PROGRESS)
                 break;
-            
-            // Pequeno delay para não sobrecarregar
+
+            if (image_size > 0)
+            {
+                int read_len = esp_https_ota_get_image_len_read(https_ota_handle);
+                s_download_progress = (read_len * 100) / image_size;
+                ESP_LOGI(TAG, "Download: %d%%", s_download_progress);
+            }
+
             vTaskDelay(pdMS_TO_TICKS(100));
         }
 
         if (err == ESP_OK)
         {
+            s_download_progress = 100;
             ESP_LOGI(TAG, "Download concluído com sucesso");
-            esp_https_ota_finish(https_ota_handle);
+            esp_err_t finish_err = esp_https_ota_finish(https_ota_handle);
+            if (finish_err != ESP_OK)
+            {
+                ESP_LOGE(TAG, "esp_https_ota_finish falhou: %s", esp_err_to_name(finish_err));
+                return false;
+            }
             return true;
         }
         else
@@ -341,17 +565,20 @@ namespace WetzelMesh
 
     bool OTAManager::install_firmware()
     {
-        // O esp_https_ota_finish já instalou o firmware automaticamente
-        // Apenas marca como válido para evitar rollback
-        esp_ota_mark_app_valid_cancel_rollback();
-        
+        esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
+        if (err != ESP_OK)
+        {
+            ESP_LOGE(TAG, "Falha ao marcar firmware como válido: %s", esp_err_to_name(err));
+            return false;
+        }
         ESP_LOGI(TAG, "Firmware instalado e marcado como válido");
         return true;
     }
 
+    // ─── OTA packet handling ────────────────────────────────────────
+
     void OTAManager::handle_ota_packet(const std::string &json)
     {
-        // Processa pacote OTA recebido da rede mesh/UART
         Protocol::Packet pkt;
         if (!Protocol::parse(json, pkt))
         {
@@ -359,59 +586,42 @@ namespace WetzelMesh
             return;
         }
 
-        // Processa tanto OTA_UPDATE quanto OTA_START
-        if ((pkt.method == "OTA_UPDATE" || pkt.method == "OTA_START") && 
+        if ((pkt.method == "OTA_UPDATE" || pkt.method == "OTA_START") &&
             pkt.type == Protocol::PacketType::REQUEST)
         {
-            // Extrai URL do firmware do body
-            // Formato esperado: {"firmware_url":"http://server/firmware.bin", "version":"2.0.0", "target":"..."}
             ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
             ESP_LOGI(TAG, "PROCESSANDO COMANDO OTA RECEBIDO");
             ESP_LOGI(TAG, "   Método: %s", pkt.method.c_str());
             ESP_LOGI(TAG, "   Body: %s", pkt.body.c_str());
             ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
-            
-            // Parse simples do body JSON
-            std::string firmware_url;
-            std::string version;
-            std::string target;
-            
-            // Extrai firmware_url
-            size_t url_pos = pkt.body.find("\"firmware_url\":\"");
-            if (url_pos != std::string::npos)
+
+            cJSON *root = cJSON_Parse(pkt.body.c_str());
+            if (!root)
             {
-                url_pos += 16; // Tamanho de "firmware_url":"
-                size_t url_end = pkt.body.find("\"", url_pos);
-                if (url_end != std::string::npos)
-                {
-                    firmware_url = pkt.body.substr(url_pos, url_end - url_pos);
-                }
+                ESP_LOGW(TAG, "Falha ao parsear body OTA como JSON");
+                return;
             }
-            
-            // Extrai version
-            size_t ver_pos = pkt.body.find("\"version\":\"");
-            if (ver_pos != std::string::npos)
-            {
-                ver_pos += 11; // Tamanho de "version":"
-                size_t ver_end = pkt.body.find("\"", ver_pos);
-                if (ver_end != std::string::npos)
-                {
-                    version = pkt.body.substr(ver_pos, ver_end - ver_pos);
-                }
-            }
-            
-            // Extrai target
-            size_t target_pos = pkt.body.find("\"target\":\"");
-            if (target_pos != std::string::npos)
-            {
-                target_pos += 10; // Tamanho de "target":"
-                size_t target_end = pkt.body.find("\"", target_pos);
-                if (target_end != std::string::npos)
-                {
-                    target = pkt.body.substr(target_pos, target_end - target_pos);
-                }
-            }
-            
+
+            std::string firmware_url, version, target, command_id;
+
+            cJSON *jurl = cJSON_GetObjectItem(root, "firmware_url");
+            if (jurl && cJSON_IsString(jurl))
+                firmware_url = jurl->valuestring;
+
+            cJSON *jver = cJSON_GetObjectItem(root, "version");
+            if (jver && cJSON_IsString(jver))
+                version = jver->valuestring;
+
+            cJSON *jtarget = cJSON_GetObjectItem(root, "target");
+            if (jtarget && cJSON_IsString(jtarget))
+                target = jtarget->valuestring;
+
+            cJSON *jcmd = cJSON_GetObjectItem(root, "command_id");
+            if (jcmd && cJSON_IsString(jcmd))
+                command_id = jcmd->valuestring;
+
+            cJSON_Delete(root);
+
             if (!firmware_url.empty())
             {
                 ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
@@ -421,16 +631,7 @@ namespace WetzelMesh
                 ESP_LOGI(TAG, "   Target: %s", target.c_str());
                 ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
 
-                // Extrai command_id do body (se presente)
-                size_t cmd_pos = pkt.body.find("\"command_id\":\"");
-                if (cmd_pos != std::string::npos)
-                {
-                    cmd_pos += 14;
-                    size_t cmd_end = pkt.body.find("\"", cmd_pos);
-                    if (cmd_end != std::string::npos)
-                        s_current_command_id = pkt.body.substr(cmd_pos, cmd_end - cmd_pos);
-                }
-
+                s_current_command_id = command_id;
                 start_update(firmware_url);
             }
             else
@@ -440,87 +641,54 @@ namespace WetzelMesh
         }
     }
 
+    // ─── OTA command processing ─────────────────────────────────────
+
     void OTAManager::process_ota_commands(const std::string &json)
     {
-        // Processa lista de comandos OTA recebidos do servidor
-        // Formato esperado: {"commands": [{"command_id":"cmd-001", "target":"gateway", "firmware_url":"...", "version":"..."}, ...]}
-        
         ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
         ESP_LOGI(TAG, "PROCESSANDO COMANDOS OTA DO SERVIDOR");
         ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
-        
-        // Parse simples do JSON (pode ser melhorado com biblioteca JSON)
-        // Procura por "commands":[
-        size_t commands_pos = json.find("\"commands\":[");
-        if (commands_pos == std::string::npos)
+
+        cJSON *root = cJSON_Parse(json.c_str());
+        if (!root)
         {
-            ESP_LOGW(TAG, "Formato de comandos OTA inválido (não encontrou 'commands')");
+            ESP_LOGW(TAG, "Formato de comandos OTA inválido (JSON parse falhou)");
             return;
         }
-        
-        commands_pos += 11; // Tamanho de "commands":[
-        
-        // Processa cada comando
-        size_t cmd_start = commands_pos;
-        while (true)
+
+        cJSON *commands = cJSON_GetObjectItem(root, "commands");
+        if (!commands || !cJSON_IsArray(commands))
         {
-            // Procura próximo objeto de comando
-            cmd_start = json.find("{", cmd_start);
-            if (cmd_start == std::string::npos)
-                break;
-            
-            size_t cmd_end = json.find("}", cmd_start);
-            if (cmd_end == std::string::npos)
-                break;
-            
-            std::string cmd_json = json.substr(cmd_start, cmd_end - cmd_start + 1);
-            
-            // Extrai campos do comando
-            std::string target;
-            std::string firmware_url;
-            std::string version;
-            std::string command_id;
-            
-            // Extrai command_id
-            size_t id_pos = cmd_json.find("\"command_id\":\"");
-            if (id_pos != std::string::npos)
-            {
-                id_pos += 14;
-                size_t id_end = cmd_json.find("\"", id_pos);
-                if (id_end != std::string::npos)
-                    command_id = cmd_json.substr(id_pos, id_end - id_pos);
-            }
-            
-            // Extrai target
-            size_t target_pos = cmd_json.find("\"target\":\"");
-            if (target_pos != std::string::npos)
-            {
-                target_pos += 10;
-                size_t target_end = cmd_json.find("\"", target_pos);
-                if (target_end != std::string::npos)
-                    target = cmd_json.substr(target_pos, target_end - target_pos);
-            }
-            
-            // Extrai firmware_url
-            size_t url_pos = cmd_json.find("\"firmware_url\":\"");
-            if (url_pos != std::string::npos)
-            {
-                url_pos += 16;
-                size_t url_end = cmd_json.find("\"", url_pos);
-                if (url_end != std::string::npos)
-                    firmware_url = cmd_json.substr(url_pos, url_end - url_pos);
-            }
-            
-            // Extrai version
-            size_t ver_pos = cmd_json.find("\"version\":\"");
-            if (ver_pos != std::string::npos)
-            {
-                ver_pos += 11;
-                size_t ver_end = cmd_json.find("\"", ver_pos);
-                if (ver_end != std::string::npos)
-                    version = cmd_json.substr(ver_pos, ver_end - ver_pos);
-            }
-            
+            ESP_LOGW(TAG, "Formato de comandos OTA inválido (sem array 'commands')");
+            cJSON_Delete(root);
+            return;
+        }
+
+        int count = cJSON_GetArraySize(commands);
+        for (int i = 0; i < count; i++)
+        {
+            cJSON *cmd = cJSON_GetArrayItem(commands, i);
+            if (!cmd)
+                continue;
+
+            std::string command_id, target, firmware_url, version;
+
+            cJSON *jid = cJSON_GetObjectItem(cmd, "command_id");
+            if (jid && cJSON_IsString(jid))
+                command_id = jid->valuestring;
+
+            cJSON *jtarget = cJSON_GetObjectItem(cmd, "target");
+            if (jtarget && cJSON_IsString(jtarget))
+                target = jtarget->valuestring;
+
+            cJSON *jurl = cJSON_GetObjectItem(cmd, "firmware_url");
+            if (jurl && cJSON_IsString(jurl))
+                firmware_url = jurl->valuestring;
+
+            cJSON *jver = cJSON_GetObjectItem(cmd, "version");
+            if (jver && cJSON_IsString(jver))
+                version = jver->valuestring;
+
             if (!target.empty() && !firmware_url.empty())
             {
                 ESP_LOGI(TAG, "Comando OTA encontrado:");
@@ -531,10 +699,9 @@ namespace WetzelMesh
 
                 process_ota_command(command_id, target, firmware_url, version);
             }
-            
-            cmd_start = cmd_end + 1;
         }
-        
+
+        cJSON_Delete(root);
         ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
     }
 
@@ -550,7 +717,6 @@ namespace WetzelMesh
 
         if (target == "gateway")
         {
-            // Gateway faz OTA próprio
             if (s_isGateway)
             {
                 ESP_LOGI(TAG, "Gateway iniciando OTA próprio...");
@@ -564,7 +730,6 @@ namespace WetzelMesh
         }
         else if (target == "border" || target == "all_nodes")
         {
-            // Distribui comando OTA para nodes via UART/mesh
             if (s_isGateway)
             {
                 ESP_LOGI(TAG, "Gateway distribuindo comando OTA para nodes...");
@@ -575,7 +740,6 @@ namespace WetzelMesh
                 ota_cmd.route.src = "gateway";
                 ota_cmd.route.dst = (target == "border") ? "border" : "broadcast";
 
-                // Cria body JSON incluindo command_id para o node reportar de volta
                 std::ostringstream body;
                 body << R"({"firmware_url":")" << firmware_url
                      << R"(","version":")" << version
@@ -584,8 +748,25 @@ namespace WetzelMesh
                 ota_cmd.body = body.str();
 
                 if (s_send_to_border_callback)
-                    s_send_to_border_callback(ota_cmd);
-                ESP_LOGI(TAG, "Comando OTA enviado para border node via UART");
+                {
+                    bool sent = s_send_to_border_callback(ota_cmd);
+                    if (sent)
+                    {
+                        ESP_LOGI(TAG, "Comando OTA enviado para border node via UART");
+                    }
+                    else
+                    {
+                        ESP_LOGE(TAG, "Falha ao enviar comando OTA via UART");
+                        if (s_report_callback)
+                            s_report_callback(false, command_id, target, "Falha ao enviar via UART");
+                    }
+                }
+                else
+                {
+                    ESP_LOGE(TAG, "Callback de envio para border não configurado");
+                    if (s_report_callback)
+                        s_report_callback(false, command_id, target, "Border callback não configurado");
+                }
             }
             else
             {
@@ -594,7 +775,6 @@ namespace WetzelMesh
         }
         else
         {
-            // Target é um node específico (ex: "node-01")
             if (s_isGateway)
             {
                 ESP_LOGI(TAG, "Gateway distribuindo comando OTA para node específico: %s", target.c_str());
@@ -605,7 +785,6 @@ namespace WetzelMesh
                 ota_cmd.route.src = "gateway";
                 ota_cmd.route.dst = target;
 
-                // Cria body JSON incluindo command_id para o node reportar de volta
                 std::ostringstream body;
                 body << R"({"firmware_url":")" << firmware_url
                      << R"(","version":")" << version
@@ -614,32 +793,32 @@ namespace WetzelMesh
                 ota_cmd.body = body.str();
 
                 if (s_send_to_border_callback)
-                    s_send_to_border_callback(ota_cmd);
-                ESP_LOGI(TAG, "Comando OTA enviado para node %s via border", target.c_str());
+                {
+                    bool sent = s_send_to_border_callback(ota_cmd);
+                    if (sent)
+                    {
+                        ESP_LOGI(TAG, "Comando OTA enviado para node %s via border", target.c_str());
+                    }
+                    else
+                    {
+                        ESP_LOGE(TAG, "Falha ao enviar comando OTA para node %s via UART", target.c_str());
+                        if (s_report_callback)
+                            s_report_callback(false, command_id, target, "Falha ao enviar via UART");
+                    }
+                }
+                else
+                {
+                    ESP_LOGE(TAG, "Callback de envio para border não configurado");
+                    if (s_report_callback)
+                        s_report_callback(false, command_id, target, "Border callback não configurado");
+                }
             }
             else
             {
-                // Node recebeu comando OTA direto (via mesh)
                 ESP_LOGI(TAG, "Node recebeu comando OTA direto, iniciando atualização...");
                 s_current_command_id = command_id;
                 start_update(firmware_url);
             }
         }
     }
-
-    void OTAManager::ota_task(void *param)
-    {
-        ESP_LOGI(TAG, "Task OTA iniciada (Gateway)");
-        
-        // Aguarda alguns segundos antes de verificar
-        vTaskDelay(pdMS_TO_TICKS(10000));
-        
-        for (;;)
-        {
-            // Verifica atualizações a cada 1 hora
-            check_for_update();
-            vTaskDelay(pdMS_TO_TICKS(3600000));  // 1 hora
-        }
-    }
 }
-
