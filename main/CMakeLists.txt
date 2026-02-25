@@ -11,7 +11,6 @@ idf_component_register(
         ble_transport
         espnow_transport
         gateway
-        security
         nvs_flash
         esp_wifi
         freertos

@@ -1,6 +1,7 @@
 #pragma once
 #include <string>
 #include <vector>
+#include <mutex>
 #include <stdint.h>
 #include "protocol.hpp"
 
@@ -19,7 +20,7 @@ namespace WetzelMesh
     public:
         static void init(bool isGateway);
         static bool is_gateway();
-        static const std::vector<Neighbor> &neighbors();
+        static std::vector<Neighbor> neighbors();
         static bool send(const Protocol::Packet &p);
         static void handle_incoming(const Protocol::Packet &packet);
         static void start_hello_task();
@@ -36,6 +37,7 @@ namespace WetzelMesh
         static void derive_pmk_from_network_id();
         static bool s_gateway;
         static std::vector<Neighbor> s_neighbors;
+        static std::mutex s_neighbors_mutex;
         static std::string s_network_id;
         static uint8_t s_pmk[16];  // PMK derivado do Network ID
     };

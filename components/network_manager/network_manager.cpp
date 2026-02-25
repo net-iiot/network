@@ -15,6 +15,7 @@
 #include "mbedtls/md5.h"
 #include <cstring>
 #include <sstream>
+#include <mutex>
 
 using namespace WetzelMesh;
 
@@ -22,6 +23,7 @@ static const char *TAG = "NETMAN";
 
 bool NetworkManager::s_gateway = false;
 std::vector<Neighbor> NetworkManager::s_neighbors;
+std::mutex NetworkManager::s_neighbors_mutex;
 std::string NetworkManager::s_network_id = "";
 uint8_t NetworkManager::s_pmk[16] = {0};
 
@@ -174,41 +176,42 @@ void NetworkManager::refresh_neighbors_task(void *param)
     {
         const uint64_t now = now_ms();
         bool any_recent = false;
+        std::vector<std::string> removed_ids;
 
-        for (auto it = s_neighbors.begin(); it != s_neighbors.end();)
         {
-            if ((now - it->last_seen_ms) > neighbor_timeout_ms)
+            std::lock_guard<std::mutex> lock(s_neighbors_mutex);
+            for (auto it = s_neighbors.begin(); it != s_neighbors.end();)
             {
-                // ✅ NOVO: Salva ID do node removido antes de apagar
-                std::string removed_node_id = it->id;
-                
-                // ✅ NOVO: Notifica gateway se for border node
-                if (BorderUart::is_enabled())
+                if ((now - it->last_seen_ms) > neighbor_timeout_ms)
                 {
-                    Protocol::Packet notification;
-                    notification.type = Protocol::PacketType::EVENT;
-                    notification.method = "NODE_LEFT";
-                    notification.route.src = BLETransport::node_id();
-                    notification.route.dst = "gateway";
-                    
-                    // Cria JSON com informações do node removido
-                    std::ostringstream body;
-                    body << R"({"node_id":")" << removed_node_id << "}";
-                    notification.body = body.str();
-                    
-                    ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
-                    ESP_LOGI(TAG, "NODE REMOVIDO (timeout): %s", removed_node_id.c_str());
-                    ESP_LOGI(TAG, "Notificando gateway...");
-                    ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
-                    BorderUart::send_to_gateway(notification);
+                    removed_ids.push_back(it->id);
+                    it = s_neighbors.erase(it);
                 }
-                
-                it = s_neighbors.erase(it);
+                else
+                {
+                    any_recent = true;
+                    ++it;
+                }
             }
-            else
+        }
+
+        // Notifica gateway fora do lock para evitar deadlock
+        if (BorderUart::is_enabled())
+        {
+            for (const auto &removed_node_id : removed_ids)
             {
-                any_recent = true;
-                ++it;
+                Protocol::Packet notification;
+                notification.type = Protocol::PacketType::EVENT;
+                notification.method = "NODE_LEFT";
+                notification.route.src = BLETransport::node_id();
+                notification.route.dst = "gateway";
+
+                std::ostringstream body;
+                body << R"({"node_id":")" << removed_node_id << "}";
+                notification.body = body.str();
+
+                ESP_LOGI(TAG, "NODE REMOVIDO (timeout): %s - Notificando gateway...", removed_node_id.c_str());
+                BorderUart::send_to_gateway(notification);
             }
         }
 
@@ -220,7 +223,7 @@ void NetworkManager::refresh_neighbors_task(void *param)
 }
 
 bool NetworkManager::is_gateway() { return s_gateway; }
-const std::vector<Neighbor> &NetworkManager::neighbors() { return s_neighbors; }
+std::vector<Neighbor> NetworkManager::neighbors() { std::lock_guard<std::mutex> lock(s_neighbors_mutex); return s_neighbors; }
 
 bool NetworkManager::send(const Protocol::Packet &p)
 {
@@ -298,7 +301,8 @@ void NetworkManager::handle_incoming(const Protocol::Packet &packet)
         response.topology.node_info.node_type = BorderUart::is_enabled() ? "border" : "normal";
         
         // Adiciona vizinhos
-        for (const auto &nbr : s_neighbors)
+        auto current_neighbors = neighbors();
+        for (const auto &nbr : current_neighbors)
         {
             Protocol::NeighborInfo nbr_info;
             nbr_info.node_id = nbr.id;
@@ -513,22 +517,27 @@ void NetworkManager::on_hello(const Protocol::Packet &hello_packet, int rssi)
     const std::string &node_id = hello_packet.route.src;
     const uint64_t now = now_ms();
     bool is_new_node = true;
-    
-    for (auto &n : s_neighbors)
+
     {
-        if (n.id == node_id)
+        std::lock_guard<std::mutex> lock(s_neighbors_mutex);
+        for (auto &n : s_neighbors)
         {
-            n.last_seen_ms = now;
-            n.rssi = rssi;
-            is_new_node = false;
-            return;
+            if (n.id == node_id)
+            {
+                n.last_seen_ms = now;
+                n.rssi = rssi;
+                is_new_node = false;
+                break;
+            }
+        }
+        if (is_new_node)
+        {
+            s_neighbors.push_back({node_id, rssi, now});
         }
     }
-    
-    // Novo node detectado (da mesma rede)
+
     if (is_new_node)
     {
-        s_neighbors.push_back({node_id, rssi, now});
         ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
         ESP_LOGI(TAG, "NOVO NODE DETECTADO (Rede: %s): %s (RSSI: %d)", 
                  s_network_id.c_str(), node_id.c_str(), rssi);
