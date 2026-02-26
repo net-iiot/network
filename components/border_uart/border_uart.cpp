@@ -1,6 +1,7 @@
 #include "border_uart.hpp"
 #include "driver/uart.h"
 #include "esp_log.h"
+#include "esp_random.h"
 #include "protocol.hpp"
 #include "led_manager.hpp"
 #include "ble_transport.hpp"

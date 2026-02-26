@@ -1,5 +1,6 @@
 #include "network_manager.hpp"
 #include "esp_log.h"
+#include "esp_random.h"
 #include "ble_transport.hpp"
 #include "gateway.hpp"
 #include "freertos/FreeRTOS.h"

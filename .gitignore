@@ -2,3 +2,4 @@ build/*
 temp/*
 managed_components/*
 .claude/
+network-iiot-mesh/
