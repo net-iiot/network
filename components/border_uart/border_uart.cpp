@@ -1,7 +1,6 @@
 #include "border_uart.hpp"
 #include "driver/uart.h"
 #include "esp_log.h"
-#include "esp_random.h"
 #include "protocol.hpp"
 #include "led_manager.hpp"
 #include "ble_transport.hpp"
@@ -341,11 +340,10 @@ namespace NetworkMesh
             if (updated_pkt.route.dst == "border" || updated_pkt.route.dst == "broadcast" || updated_pkt.route.dst.empty() ||
                 (updated_pkt.type == Protocol::PacketType::REQUEST && updated_pkt.method == "DISCOVERY"))
             {
-                uint32_t backoff_ms = 50 + (esp_random() % 151);
-                ESP_LOGI(TAG, "Border %s reencaminhando UART->MESH (backoff %ums): method=%s",
-                         current_node_id.c_str(), (unsigned)backoff_ms, updated_pkt.method.c_str());
-                LedManager::set_led_on_for_duration(backoff_ms);
-                vTaskDelay(pdMS_TO_TICKS(backoff_ms));
+                ESP_LOGI(TAG, "Border %s reencaminhando UART->MESH: method=%s",
+                         current_node_id.c_str(), updated_pkt.method.c_str());
+                LedManager::set_led_on_for_duration(1000);
+                vTaskDelay(pdMS_TO_TICKS(1000));
                 ESPNOWTransport::send(updated_pkt);
             }
         }

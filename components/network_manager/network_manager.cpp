@@ -1,6 +1,5 @@
 #include "network_manager.hpp"
 #include "esp_log.h"
-#include "esp_random.h"
 #include "ble_transport.hpp"
 #include "gateway.hpp"
 #include "freertos/FreeRTOS.h"
@@ -118,11 +117,10 @@ void NetworkManager::route_packet(const Protocol::Packet &pkt)
         hop.transport = "MESH";
         updated_pkt.trace.hop_history.push_back(hop);
 
-        uint32_t backoff_ms = 50 + (esp_random() % 151);
-        ESP_LOGI(TAG, "Node %s recebeu dado da mesh (hop %u) - backoff %ums",
-                 current_node_id.c_str(), updated_pkt.trace.hop_count, (unsigned)backoff_ms);
-        LedManager::set_led_on_for_duration(backoff_ms);
-        vTaskDelay(pdMS_TO_TICKS(backoff_ms));
+        ESP_LOGI(TAG, "Node %s recebeu dado da mesh (hop %u) - aguardando 1s antes de repassar",
+                 current_node_id.c_str(), updated_pkt.trace.hop_count);
+        LedManager::set_led_on_for_duration(1000);
+        vTaskDelay(pdMS_TO_TICKS(1000));
 
         ESP_LOGI(TAG, "Repassando dado apos backoff...");
         ESPNOWTransport::send(updated_pkt);
