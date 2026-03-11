@@ -411,7 +411,8 @@ void NetworkManager::handle_incoming(const Protocol::Packet &packet)
         std::string my_id = BLETransport::node_id();
         bool is_for_me = (packet.route.dst == my_id ||
                           packet.route.dst == "broadcast" ||
-                          packet.route.dst == "all_nodes");
+                          packet.route.dst == "all_nodes" ||
+                          (packet.route.dst == "border" && BorderUart::is_enabled()));
 
         if (is_for_me)
         {
