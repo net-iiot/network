@@ -97,11 +97,12 @@ config NETWORK_GATEWAY_WIFI_PASSWORD
 
 config NETWORK_GATEWAY_SERVER_URL
     string "URL do Servidor HTTP"
-    default "http://"
+    default "http://192.168.1.100:8080"
     help
       URL completa do servidor HTTP onde o microserviço está rodando.
       Exemplo: http://192.168.1.100:8080
       O gateway enviará todos os dados recebidos da mesh para este servidor.
+      IMPORTANTE: Configure com o IP e porta reais do servidor antes de flashar.
 
 endmenu
 

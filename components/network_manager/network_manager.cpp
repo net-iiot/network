@@ -169,8 +169,8 @@ void NetworkManager::init(bool isGateway)
         LedManager::set_uart_enabled(BorderUart::is_enabled());
         BorderUart::set_rx_handler([](const Protocol::Packet &pkt)
                                    {
-            ESP_LOGI(TAG, "FLOW: UART(BORDER<-GW) -> route_packet");
-            route_packet(pkt); });
+            ESP_LOGI(TAG, "FLOW: UART(BORDER<-GW) -> handle_incoming");
+            handle_incoming(pkt); });
 
         xTaskCreatePinnedToCore(&NetworkManager::refresh_neighbors_task, "neighbors", 4096, nullptr, 4, nullptr, 0);
         start_hello_task();
@@ -456,6 +456,11 @@ void NetworkManager::handle_incoming(const Protocol::Packet &packet)
 
     if (packet.route.dst == "gateway")
     {
+        if (packet.route.src == "gateway")
+        {
+            ESP_LOGW(TAG, "Pacote com src=gateway e dst=gateway descartado (loop)");
+            return;
+        }
         if (BorderUart::is_enabled())
         {
             ESP_LOGI(TAG, "FORWARD: NODE(BORDER) -> GW via UART");
@@ -485,6 +490,7 @@ void NetworkManager::start_hello_task()
             hello.body = R"({"t":"hello"})";
 
             hello.topology.node_id = BLETransport::node_id();
+            hello.topology.network_id = NetworkManager::get_network_id();
             hello.topology.has_gateway = BorderUart::is_enabled();
             if (hello.topology.has_gateway)
                 hello.topology.gateway_id = "gateway";

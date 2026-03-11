@@ -707,9 +707,13 @@ namespace NetworkMesh
                 }
             }
 
-            if (pkt.route.dst == "server" || pkt.type == Protocol::PacketType::REQUEST)
+            if (pkt.route.dst == "server" ||
+                pkt.type == Protocol::PacketType::REQUEST ||
+                pkt.type == Protocol::PacketType::EVENT)
             {
-                ESP_LOGI(TAG, "Requisição HTTP recebida: %s %s", pkt.method.c_str(), pkt.endpoint.c_str());
+                ESP_LOGI(TAG, "Encaminhando para servidor: type=%s method=%s src=%s",
+                         pkt.type == Protocol::PacketType::EVENT ? "EVENT" : "REQUEST",
+                         pkt.method.c_str(), pkt.route.src.c_str());
                 send_http_request(pkt);
             }
         }

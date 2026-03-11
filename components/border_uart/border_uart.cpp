@@ -338,11 +338,17 @@ namespace NetworkMesh
                 s_rx_handler(pkt);
             }
 
-            if (updated_pkt.route.dst == "border" || updated_pkt.route.dst == "broadcast" || updated_pkt.route.dst.empty() ||
-                (updated_pkt.type == Protocol::PacketType::REQUEST && updated_pkt.method == "DISCOVERY"))
+            bool should_forward_to_mesh =
+                updated_pkt.route.dst == "broadcast" ||
+                updated_pkt.route.dst.empty() ||
+                (updated_pkt.type == Protocol::PacketType::REQUEST && updated_pkt.method == "DISCOVERY") ||
+                (updated_pkt.route.dst != "gateway" && updated_pkt.route.dst != "server" &&
+                 updated_pkt.route.dst != "border");
+
+            if (should_forward_to_mesh)
             {
-                ESP_LOGI(TAG, "Border %s reencaminhando UART->MESH: method=%s",
-                         current_node_id.c_str(), updated_pkt.method.c_str());
+                ESP_LOGI(TAG, "Border %s reencaminhando UART->MESH: method=%s dst=%s",
+                         current_node_id.c_str(), updated_pkt.method.c_str(), updated_pkt.route.dst.c_str());
                 LedManager::set_led_on_for_duration(1000);
                 vTaskDelay(pdMS_TO_TICKS(1000));
                 ESPNOWTransport::send(updated_pkt);
