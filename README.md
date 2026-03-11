@@ -76,6 +76,35 @@ NetworkMesh utiliza alguns componentes integrados ao ESP-IDF:
 
 ---
 
+### 3️⃣ Placas com 8MB de flash (config_2)
+
+Se a placa tiver **8MB de flash** (e não 16MB), o firmware padrão da `main` pode gerar erro ao bootar:
+
+```text
+Detected size(8192k) smaller than the size in the binary image header(16384k)
+```
+
+Use a branch **config_2**, que já deixa o build compatível com 8MB:
+
+```bash
+git fetch origin
+git checkout config_2
+# Apagar sdkconfig para aplicar os defaults de 8MB
+del sdkconfig sdkconfig.old
+idf.py set-target esp32
+idf.py build
+idf.py -p COMx flash
+```
+
+Na `config_2` estão configurados:
+
+- **Flash:** 8MB (`CONFIG_ESPTOOLPY_FLASHSIZE_8MB`)
+- **Tabela de partições:** `partitions_8mb.csv` (OTA 2MB+2MB, storage ~4MB)
+
+Para voltar a compilar para placas com 16MB, use a branch `main` e, se precisar, apague `sdkconfig` e `sdkconfig.old` antes de `idf.py set-target esp32`.
+
+---
+
 ## 🧱 Estrutura do Projeto
 
 ```

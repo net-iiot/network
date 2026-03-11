@@ -1,0 +1,9 @@
+# Tabela de partições para placas com 8MB de flash (config_2)
+# NVS, otadata e phy_init iguais; OTA e storage reduzidos para caber em 8MB
+# Name,   Type, SubType, Offset,  Size,     Flags
+nvs,      data, nvs,     0x9000,  0x10000,
+otadata,  data, ota,           ,  0x2000,
+phy_init, data, phy,           ,  0x1000,
+ota_0,    app,  ota_0,         ,  0x200000,
+ota_1,    app,  ota_1,         ,  0x200000,
+storage,  data, spiffs,        ,  0x3E0000,
