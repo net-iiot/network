@@ -105,6 +105,42 @@ Para voltar a compilar para placas com 16MB, use a branch `main` e, se precisar,
 
 ---
 
+### 4️⃣ Bluetooth BLE — conexão com celular e outros dispositivos
+
+Os nós (não o gateway) expõem um **servidor GATT BLE** para dispositivos externos se conectarem e enviarem dados para a mesh. Assim, um **celular**, um app Flutter ou outro central BLE pode descobrir o nó, conectar e enviar pacotes no mesmo formato do protocolo.
+
+#### Nome e descoberta
+
+| Item | Valor |
+|------|--------|
+| **Nome do dispositivo (GAP)** | `NetworkMesh` |
+| **Modo de descoberta** | Advertising com serviço customizado; conexão e pairing **Just Works** (sem PIN). |
+
+#### UUIDs (serviço e características)
+
+| Uso | UUID 128-bit (string) |
+|-----|------------------------|
+| **Serviço principal** | `574D0001-AABB-CCDD-8899-102030405060` |
+| **Característica RX** (enviar dados para a mesh) | `574D0002-AABB-CCDD-8899-102030405060` |
+| **Característica Button** (eventos de botão) | `574D0004-AABB-CCDD-8899-102030405060` |
+
+#### Características
+
+- **RX** (`574D0002-...`): **Write**. O cliente (ex.: app no celular) escreve aqui um **JSON** no formato do protocolo (pacote completo: `type`, `route.src`, `route.dst`, `method`, `body`, etc.). O nó interpreta e encaminha na mesh via `NetworkManager::handle_incoming`.
+- **Button** (`574D0004-...`): **Write**. Pacote **binário** (`ButtonPacket`: `version`, `event_type`, `battery_pct`, `button_id[16]`, etc.). Usado para eventos de botão; o nó monta o EVENT e envia para a rede.
+
+#### Como conectar (ex.: celular)
+
+1. Escanear BLE por nome **`NetworkMesh`** ou pelo **UUID do serviço** `574D0001-AABB-CCDD-8899-102030405060`.
+2. Conectar ao dispositivo. O pairing é **Just Works** (sem necessidade de PIN).
+3. Descobrir serviços e características (serviço acima; RX e Button como na tabela).
+4. **Enviar dados para a mesh:** escrever na característica **RX** uma string JSON que seja um pacote válido do protocolo (mesma estrutura usada na documentação do protocolo neste README).
+5. **Enviar evento de botão:** escrever na característica **Button** o binário no formato `ButtonPacket` (ver `ble_transport.hpp`).
+
+> **Nota:** Hoje o nó **não** expõe uma característica Notify/Indicate para enviar dados da mesh de volta ao celular; o fluxo BLE é **envio do cliente para a rede**. Para receber dados no app seria necessário adicionar uma característica TX com Notify/Indicate no firmware.
+
+---
+
 ## 🧱 Estrutura do Projeto
 
 ```
