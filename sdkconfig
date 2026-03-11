@@ -435,8 +435,9 @@ CONFIG_PARTITION_TABLE_MD5=y
 #
 # Network IIoT - Configurações de Firmware
 #
-# CONFIG_WM_ROLE_GATEWAY is not set
-CONFIG_WM_ROLE_NODE=y
+CONFIG_WM_ROLE_GATEWAY=y
+# CONFIG_WM_ROLE_NODE is not set
+CONFIG_NETWORK_IS_GATEWAY=y
 
 #
 # Isolamento de Rede
@@ -445,6 +446,14 @@ CONFIG_NETWORK_NETWORK_ID="mesh"
 CONFIG_NETWORK_WIFI_CHANNEL=1
 CONFIG_NETWORK_NEIGHBOR_TIMEOUT_MS=12000
 # end of Isolamento de Rede
+
+#
+# Credenciais de Rede (apenas Gateway)
+#
+CONFIG_NETWORK_GATEWAY_WIFI_SSID="COR_ELE"
+CONFIG_NETWORK_GATEWAY_WIFI_PASSWORD="Cwe@1602"
+CONFIG_NETWORK_GATEWAY_SERVER_URL="http://172.16.10.110:5003"
+# end of Credenciais de Rede (apenas Gateway)
 # end of Network IIoT - Configurações de Firmware
 
 #
